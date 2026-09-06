@@ -21,9 +21,9 @@ jobs:
       - name: Install EAS CLI
         run: npm install -g eas-cli
 
-      - name: Init EAS Project & Publish
+      - name: Publish to Expo Go
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
           npx eas-cli init --account rorolidalgo --non-interactive || true
-          npx eas-cli update --branch main --message "Release pour Expo Go" --non-interactive
+          npx eas-cli update --branch main --message "Expo Go Bundle" --non-interactive
