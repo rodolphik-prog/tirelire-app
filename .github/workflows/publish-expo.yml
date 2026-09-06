@@ -21,7 +21,9 @@ jobs:
       - name: Install EAS CLI
         run: npm install -g eas-cli
 
-      - name: Publish Update
+      - name: Init EAS Project & Publish
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: npx eas-cli update --auto --non-interactive
+        run: |
+          npx eas-cli init --account rorolidalgo --non-interactive || true
+          npx eas-cli update --auto --non-interactive
