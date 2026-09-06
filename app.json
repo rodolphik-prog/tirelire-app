@@ -3,9 +3,8 @@
     "name": "Tirelire",
     "slug": "tirelire",
     "version": "1.0.0",
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
+    "sdkVersion": "57.0.0",
+    "runtimeVersion": "exposdk:57.0.0",
     "jsEngine": "jsc",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
