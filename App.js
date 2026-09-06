@@ -7,7 +7,7 @@ import { db } from './firebase';
 import { 
   collection, onSnapshot, addDoc, updateDoc, doc, setDoc,
   query, where, serverTimestamp 
-} from '@firebase/firestore';
+} from 'firebase/firestore';
 
 export default function App() {
   const [enfants, setEnfants] = useState([]);
