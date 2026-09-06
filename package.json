@@ -16,7 +16,8 @@
     "react-native": "0.76.7"
   },
   "devDependencies": {
-    "@babel/core": "^7.25.2"
+    "@babel/core": "^7.25.2",
+    "hermes-compiler": "^0.23.0"
   },
   "private": true
 }
