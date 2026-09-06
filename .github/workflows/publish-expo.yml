@@ -21,9 +21,6 @@ jobs:
       - name: Install EAS CLI
         run: npm install -g eas-cli
 
-      - name: Fix Expo dependencies
-        run: npx expo install --fix
-
       - name: Init EAS Project & Publish
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
