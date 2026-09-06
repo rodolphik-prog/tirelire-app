@@ -26,4 +26,6 @@ jobs:
         run: npm install --legacy-peer-deps
 
       - name: Build APK
-        run: eas build --platform android --profile preview --non-interactive
+        run: |
+          npx eas-cli init --auto --non-interactive
+          npx eas-cli build --platform android --profile preview --non-interactive
