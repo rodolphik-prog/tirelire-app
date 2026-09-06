@@ -1,12 +1,21 @@
 {
-  "expo": {
-    "name": "Tirelire",
-    "slug": "tirelire",
-    "version": "1.0.0",
-    "orientation": "portrait",
-    "userInterfaceStyle": "light",
-    "android": {
-      "package": "com.tirelire.app"
-    }
-  }
+  "name": "tirelire",
+  "version": "1.0.0",
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "expo": "~57.0.0",
+    "expo-status-bar": "~2.2.0",
+    "react": "18.3.1",
+    "react-native": "0.76.7"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2"
+  },
+  "private": true
 }
