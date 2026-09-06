@@ -27,5 +27,5 @@ jobs:
 
       - name: Build APK
         run: |
-          npx eas-cli init --auto --non-interactive
-          npx eas-cli build --platform android --profile preview --non-interactive
+          eas init --non-interactive
+          eas build --platform android --profile preview --non-interactive
