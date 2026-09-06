@@ -26,4 +26,5 @@ jobs:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
           npx eas-cli init --account rorolidalgo --non-interactive || true
-          npx eas-cli update --branch main --message "Update SDK 57 for Expo Go" --non-interactive
+          npx eas-cli channel:edit default --branch main --non-interactive || true
+          npx eas-cli update --branch main --message "Update SDK 57" --non-interactive
