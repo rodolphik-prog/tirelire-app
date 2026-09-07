@@ -30,8 +30,8 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Export Expo Bundle
-        run: npx expo export
+      - name: Export Native Expo Bundle
+        run: npx expo export --platform android
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
