@@ -13,10 +13,10 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install dependencies
-        run: npm ci || npm install --legacy-peer-deps
+        run: npm install --legacy-peer-deps
 
       - name: Install EAS CLI
         run: npm install -g eas-cli
@@ -25,4 +25,5 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
+          npx eas-cli init --account rorolidalgo --non-interactive || true
           npx eas-cli build --platform android --profile preview --non-interactive
