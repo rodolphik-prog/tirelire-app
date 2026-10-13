@@ -25,4 +25,5 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
-          npx eas-cli build --platform android --profile preview --id 8c1390bd-c29a-49b7-be7d-445c9c506361 --non-interactive
+          npx eas-cli project:init --id 8c1390bd-c29a-49b7-be7d-445c9c506361 --force || true
+          npx eas-cli build --platform android --profile preview --non-interactive
