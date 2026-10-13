@@ -6,7 +6,7 @@
     "preview": {
       "android": {
         "buildType": "apk",
-        "image": "latest"
+        "gradleCommand": ":app:assembleRelease"
       }
     }
   }
