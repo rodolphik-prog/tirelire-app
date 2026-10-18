@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Tirelire",
+    "slug": "tirelire",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "icon": "./icon.png",
+    "android": {
+      "package": "com.tirelire.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./adaptive-icon.png",
+        "backgroundColor": "#e6eef8"
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "8c1390bd-c29a-49b7-be7d-445c9c506361"
+      }
+    }
+  }
+}
