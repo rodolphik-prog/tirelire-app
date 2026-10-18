@@ -5,8 +5,13 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
+    "icon": "./icon.png",
     "android": {
-      "package": "com.tirelire.app"
+      "package": "com.tirelire.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./adaptive-icon.png",
+        "backgroundColor": "#e6eef8"
+      }
     },
     "extra": {
       "eas": {
