@@ -4,6 +4,8 @@ import {
   Alert,
   BackHandler,
   FlatList,
+  Image,
+  ImageBackground,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -35,21 +37,28 @@ import {
 import { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { db } from './firebase';
 
+// ---------- Images ----------
+const IMG_FOND = require('./fond.png'); // fond d'écran : remplacer ce fichier pour changer de fond
+const IMG_LOGO = require('./logo.png'); // le cochon bleu
+const IMG_CARTE = require('./carte.png'); // carte du solde bleu métallisé
+
 // ---------- Couleurs ----------
+const BLEU = '#1e4f96';
+const BLEU_FONCE = '#0f2f5f';
+const BLEU_PALE = '#e6eef8';
+const BLEU_TEXTE_CLAIR = '#cfe0f7';
 const VERT = '#2e7d32';
 const VERT_CLAIR = '#e8f5e9';
-const ROUGE = '#c62828';
+const ROUGE = '#d32f2f';
 const ROUGE_CLAIR = '#ffebee';
-const ROSE = '#f48fb1';
-const FOND = '#f6f7f9';
-const TEXTE = '#1f2933';
-const GRIS = '#6b7280';
-const BORDURE = '#e5e7eb';
+const TEXTE = '#0f1f33';
+const GRIS = '#64748b';
+const BORDURE = '#e2e8f0';
 const PLACEHOLDER = '#c4c8cf'; // gris très clair des textes d'exemple dans les champs
 
 // ---------- Mémoire du téléphone ----------
-const CLE_CODES = 'tirelire:codes'; // liste des tirelires suivies sur ce téléphone
-const CLE_CODE_ANCIEN = 'tirelire:code'; // ancienne version : une seule tirelire
+const CLE_CODES = 'tirelire:codes'; // tirelires suivies sur ce téléphone : [{ code, lecture }]
+const CLE_CODE_ANCIEN = 'tirelire:code'; // toute première version : une seule tirelire
 const CLE_PRENOM = 'tirelire:prenom';
 
 // ---------- Outils ----------
@@ -98,7 +107,7 @@ function memeJour(a, b) {
 function formatDate(date) {
   if (!date) return '';
   const p = (n) => String(n).padStart(2, '0');
-  return `${p(date.getDate())}/${p(date.getMonth() + 1)}/${date.getFullYear()} à ${p(date.getHours())}h${p(date.getMinutes())}`;
+  return `${formatJour(date)} à ${p(date.getHours())}h${p(date.getMinutes())}`;
 }
 
 function messageErreur(e) {
@@ -111,6 +120,18 @@ function messageErreur(e) {
   return (e && e.message) || 'Une erreur inconnue est survenue.';
 }
 
+// Bouton "retour" d'Android
+function useRetourAndroid(action) {
+  useEffect(() => {
+    if (!action) return undefined;
+    const abonnement = BackHandler.addEventListener('hardwareBackPress', () => {
+      action();
+      return true;
+    });
+    return () => abonnement.remove();
+  }, [action]);
+}
+
 // ---------- Application ----------
 export default function App() {
   return (
@@ -121,9 +142,26 @@ export default function App() {
   );
 }
 
+// Fond d'écran commun à tous les écrans
+function Ecran({ children, centre }) {
+  return (
+    <ImageBackground source={IMG_FOND} style={styles.fond} resizeMode="cover">
+      <SafeAreaView style={[styles.ecran, centre && styles.centre]}>{children}</SafeAreaView>
+    </ImageBackground>
+  );
+}
+
+function Chargement() {
+  return (
+    <Ecran centre>
+      <ActivityIndicator size="large" color={BLEU} />
+    </Ecran>
+  );
+}
+
 function Racine() {
   const [chargement, setChargement] = useState(true);
-  const [codes, setCodes] = useState([]); // toutes les tirelires suivies (une par enfant, par exemple)
+  const [tirelires, setTirelires] = useState([]); // [{ code, lecture }] : une par enfant, par exemple
   const [ouverte, setOuverte] = useState(null); // code de la tirelire affichée, ou null pour la liste
   const [ajout, setAjout] = useState(false); // écran "ajouter une tirelire"
   const [prenom, setPrenom] = useState('');
@@ -137,11 +175,14 @@ function Racine() {
           AsyncStorage.getItem(CLE_PRENOM),
         ]);
         if (liste) {
-          setCodes(JSON.parse(liste));
+          // Les versions précédentes rangeaient seulement les codes.
+          setTirelires(
+            JSON.parse(liste).map((t) => (typeof t === 'string' ? { code: t, lecture: false } : t))
+          );
         } else if (ancien) {
-          // Reprend la tirelire de la version précédente de l'appli.
-          setCodes([ancien]);
-          await AsyncStorage.setItem(CLE_CODES, JSON.stringify([ancien]));
+          const reprise = [{ code: ancien, lecture: false }];
+          setTirelires(reprise);
+          await AsyncStorage.setItem(CLE_CODES, JSON.stringify(reprise));
         }
         if (p) setPrenom(p);
       } catch (e) {
@@ -151,15 +192,21 @@ function Racine() {
     })();
   }, []);
 
-  async function enregistrerCodes(liste) {
-    setCodes(liste);
+  async function enregistrer(liste) {
+    setTirelires(liste);
     try {
       await AsyncStorage.setItem(CLE_CODES, JSON.stringify(liste));
     } catch (e) {}
   }
 
-  async function entrer(code, nouveauPrenom) {
-    if (!codes.includes(code)) await enregistrerCodes([...codes, code]);
+  async function entrer(code, nouveauPrenom, lecture) {
+    const existante = tirelires.find((t) => t.code === code);
+    if (!existante) {
+      await enregistrer([...tirelires, { code, lecture }]);
+    } else if (existante.lecture && !lecture) {
+      // On avait la tirelire en lecture seule, on reçoit maintenant le code complet.
+      await enregistrer(tirelires.map((t) => (t.code === code ? { code, lecture: false } : t)));
+    }
     try {
       await AsyncStorage.setItem(CLE_PRENOM, nouveauPrenom);
     } catch (e) {}
@@ -169,87 +216,134 @@ function Racine() {
   }
 
   function retirer(code) {
-    enregistrerCodes(codes.filter((c) => c !== code));
+    enregistrer(tirelires.filter((t) => t.code !== code));
     setOuverte(null);
   }
 
-  if (chargement) {
-    return (
-      <SafeAreaView style={[styles.ecran, styles.centre]}>
-        <ActivityIndicator size="large" color={VERT} />
-      </SafeAreaView>
-    );
-  }
+  const revenirListe = useCallback(() => setOuverte(null), []);
+  const fermerAjout = useCallback(() => setAjout(false), []);
+
+  if (chargement) return <Chargement />;
+
   if (ouverte) {
+    const t = tirelires.find((x) => x.code === ouverte);
     return (
       <Tirelire
         code={ouverte}
         prenom={prenom}
-        onRetour={() => setOuverte(null)}
+        lectureSeule={t ? t.lecture : false}
+        onRetour={revenirListe}
         onQuitter={() => retirer(ouverte)}
       />
     );
   }
-  if (ajout || codes.length === 0) {
+  if (ajout || tirelires.length === 0) {
     return (
       <Accueil
         prenomInitial={prenom}
         onEntrer={entrer}
-        onRetour={codes.length > 0 ? () => setAjout(false) : null}
+        onRetour={tirelires.length > 0 ? fermerAjout : null}
       />
     );
   }
   return (
-    <ListeTirelires codes={codes} onOuvrir={setOuverte} onAjouter={() => setAjout(true)} />
+    <ListeTirelires tirelires={tirelires} onOuvrir={setOuverte} onAjouter={() => setAjout(true)} />
+  );
+}
+
+// ---------- En-tête avec le cochon ----------
+function EnTete({ titre, sousTitre, onSousTitre, onRetour, droite }) {
+  return (
+    <View style={styles.entete}>
+      {onRetour && (
+        <Pressable onPress={onRetour} hitSlop={12} style={styles.boutonRetour}>
+          <Text style={styles.texteRetour}>‹</Text>
+        </Pressable>
+      )}
+      <Image source={IMG_LOGO} style={styles.logoEntete} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.titreEntete} numberOfLines={1}>
+          {titre}
+        </Text>
+        {sousTitre ? (
+          <Pressable onPress={onSousTitre} disabled={!onSousTitre} hitSlop={8}>
+            <Text style={styles.sousTitreEntete} numberOfLines={1}>
+              {sousTitre}
+            </Text>
+          </Pressable>
+        ) : null}
+      </View>
+      {droite}
+    </View>
+  );
+}
+
+// ---------- Carte bleu métallisé (ou rouge en cas d'avance) ----------
+function CarteSolde({ rouge, children }) {
+  if (rouge) {
+    return <View style={[styles.carteSolde, { backgroundColor: ROUGE }]}>{children}</View>;
+  }
+  return (
+    <ImageBackground
+      source={IMG_CARTE}
+      style={styles.carteSolde}
+      imageStyle={{ borderRadius: 24 }}
+      resizeMode="cover"
+    >
+      {children}
+    </ImageBackground>
   );
 }
 
 // ---------- Écran "Mes tirelires" ----------
-function ListeTirelires({ codes, onOuvrir, onAjouter }) {
+function ListeTirelires({ tirelires, onOuvrir, onAjouter }) {
   const [soldes, setSoldes] = useState({});
   const majSolde = useCallback(
     (code, solde) =>
       setSoldes((avant) => (avant[code] === solde ? avant : { ...avant, [code]: solde })),
     []
   );
-  const total = codes.reduce((t, c) => t + (soldes[c] || 0), 0);
+  const total = tirelires.reduce((t, x) => t + (soldes[x.code] || 0), 0);
 
   return (
-    <SafeAreaView style={styles.ecran}>
-      <View style={styles.entete}>
-        <Text style={styles.nomTirelire}>🐷 Mes tirelires</Text>
-      </View>
+    <Ecran>
+      <EnTete titre="Mes tirelires" />
       <FlatList
-        data={codes}
-        keyExtractor={(c) => c}
+        data={tirelires}
+        keyExtractor={(t) => t.code}
         ListHeaderComponent={
-          codes.length > 1 ? (
-            <View style={[styles.carteSolde, total < 0 && { backgroundColor: ROUGE }]}>
+          tirelires.length > 1 ? (
+            <CarteSolde rouge={total < 0}>
               <Text style={[styles.etiquetteSolde, total < 0 && { color: '#ffcdd2' }]}>
                 Total de toutes les tirelires
               </Text>
               <Text style={styles.solde}>{formatEuros(total)}</Text>
-            </View>
+            </CarteSolde>
           ) : null
         }
         renderItem={({ item }) => (
-          <CarteTirelire code={item} onOuvrir={() => onOuvrir(item)} onSolde={majSolde} />
+          <CarteTirelire
+            code={item.code}
+            lecture={item.lecture}
+            onOuvrir={() => onOuvrir(item.code)}
+            onSolde={majSolde}
+          />
         )}
         ListFooterComponent={
           <Bouton
             titre="+ Ajouter une tirelire"
             onPress={onAjouter}
-            couleur={ROSE}
-            style={{ marginTop: 8 }}
+            couleur={BLEU}
+            style={{ marginTop: 6 }}
           />
         }
         contentContainerStyle={styles.liste}
       />
-    </SafeAreaView>
+    </Ecran>
   );
 }
 
-function CarteTirelire({ code, onOuvrir, onSolde }) {
+function CarteTirelire({ code, lecture, onOuvrir, onSolde }) {
   const [infos, setInfos] = useState(null);
   const [solde, setSolde] = useState(null);
   const [erreur, setErreur] = useState(false);
@@ -285,32 +379,39 @@ function CarteTirelire({ code, onOuvrir, onSolde }) {
   const objectif = infos && infos.objectif ? infos.objectif : 0;
   const progression =
     objectif > 0 && solde !== null ? Math.max(0, Math.min(1, solde / objectif)) : 0;
+  const avance = solde !== null && solde < 0;
+
+  let sousTitre;
+  if (erreur) sousTitre = 'Introuvable ou inaccessible';
+  else if (avance) sousTitre = 'Avance à rembourser';
+  else if (objectif > 0)
+    sousTitre = `${infos.objectifNom || 'Objectif'} ${formatEuros(objectif)} · ${Math.floor(
+      progression * 100
+    )} %`;
+  else sousTitre = lecture ? 'Lecture seule' : `Code ${code}`;
 
   return (
     <Pressable
       onPress={onOuvrir}
-      style={({ pressed }) => [styles.carteListe, pressed && { opacity: 0.7 }]}
+      style={({ pressed }) => [styles.carteListe, pressed && { opacity: 0.75 }]}
     >
       <View style={{ flex: 1 }}>
-        <Text style={styles.ligneTitre} numberOfLines={1}>
-          {erreur ? `Tirelire ${code}` : infos ? infos.nom : '…'}
-        </Text>
+        <View style={styles.rangeeTitre}>
+          <Text style={styles.ligneTitre} numberOfLines={1}>
+            {erreur ? `Tirelire ${code}` : infos ? infos.nom : '…'}
+          </Text>
+          {lecture && <Text style={styles.badge}>👀</Text>}
+        </View>
         <Text style={styles.ligneSous} numberOfLines={1}>
-          {erreur
-            ? 'Introuvable ou inaccessible'
-            : solde !== null && solde < 0
-            ? 'Avance à rembourser'
-            : objectif > 0
-            ? `Objectif ${formatEuros(objectif)} · ${Math.floor(progression * 100)} %`
-            : `Code ${code}`}
+          {sousTitre}
         </Text>
-        {objectif > 0 && !erreur && (
+        {objectif > 0 && !erreur && !avance && (
           <View style={styles.barreListe}>
             <View style={[styles.barreListeRemplie, { width: `${progression * 100}%` }]} />
           </View>
         )}
       </View>
-      <Text style={[styles.soldeListe, solde !== null && solde < 0 && { color: ROUGE }]}>
+      <Text style={[styles.soldeListe, avance && { color: ROUGE }]}>
         {solde === null ? '' : formatEuros(solde)}
       </Text>
       <Text style={styles.chevron}>›</Text>
@@ -324,6 +425,8 @@ function Accueil({ prenomInitial, onEntrer, onRetour }) {
   const [nom, setNom] = useState('');
   const [codeSaisi, setCodeSaisi] = useState('');
   const [occupe, setOccupe] = useState(false);
+
+  useRetourAndroid(onRetour);
 
   function prenomValide() {
     const p = prenom.trim();
@@ -353,7 +456,7 @@ function Accueil({ prenomInitial, onEntrer, onRetour }) {
         creePar: p,
         creeLe: serverTimestamp(),
       });
-      await onEntrer(nouveauCode, p);
+      await onEntrer(nouveauCode, p, false);
     } catch (e) {
       Alert.alert('Erreur', messageErreur(e));
       setOccupe(false);
@@ -370,31 +473,28 @@ function Accueil({ prenomInitial, onEntrer, onRetour }) {
     }
     setOccupe(true);
     try {
-      const snap = await getDoc(doc(db, 'tirelires', c));
-      if (!snap.exists()) {
-        Alert.alert('Introuvable', 'Aucune tirelire ne porte ce code. Vérifie-le.');
-        setOccupe(false);
+      // Code complet (parent) ?
+      const tirelire = await getDoc(doc(db, 'tirelires', c));
+      if (tirelire.exists()) {
+        await onEntrer(c, p, false);
         return;
       }
-      await onEntrer(c, p);
+      // Code enfant (lecture seule) ?
+      const lecture = await getDoc(doc(db, 'lectures', c));
+      if (lecture.exists() && lecture.data().tirelire) {
+        await onEntrer(lecture.data().tirelire, p, true);
+        return;
+      }
+      Alert.alert('Introuvable', 'Aucune tirelire ne porte ce code. Vérifie-le.');
+      setOccupe(false);
     } catch (e) {
       Alert.alert('Erreur', messageErreur(e));
       setOccupe(false);
     }
   }
 
-  // Bouton "retour" d'Android : revient à la liste des tirelires.
-  useEffect(() => {
-    if (!onRetour) return undefined;
-    const abonnement = BackHandler.addEventListener('hardwareBackPress', () => {
-      onRetour();
-      return true;
-    });
-    return () => abonnement.remove();
-  }, [onRetour]);
-
   return (
-    <SafeAreaView style={styles.ecran}>
+    <Ecran>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -405,39 +505,44 @@ function Accueil({ prenomInitial, onEntrer, onRetour }) {
               <Text style={styles.lienRetour}>‹ Mes tirelires</Text>
             </Pressable>
           )}
-          <Text style={styles.logo}>🐷</Text>
+          <Image source={IMG_LOGO} style={styles.logoAccueil} />
           <Text style={styles.titreAccueil}>Tirelire</Text>
-          <Text style={styles.sousTitre}>Épargnez seul ou à plusieurs</Text>
+          <Text style={styles.sousTitre}>L'argent de poche de toute la famille</Text>
 
-          <Text style={styles.etiquette}>Ton prénom</Text>
-          <TextInput
-            placeholderTextColor={PLACEHOLDER}
-            style={styles.champ}
-            placeholder="Par exemple : Léa"
-            value={prenom}
-            onChangeText={setPrenom}
-            maxLength={30}
-          />
+          <View style={styles.carte}>
+            <Text style={styles.etiquette}>Ton prénom</Text>
+            <TextInput
+              placeholderTextColor={PLACEHOLDER}
+              style={styles.champ}
+              placeholder="Par exemple : Léa"
+              value={prenom}
+              onChangeText={setPrenom}
+              maxLength={30}
+            />
+          </View>
 
           <View style={styles.carte}>
             <Text style={styles.titreCarte}>Créer une nouvelle tirelire</Text>
             <TextInput
-            placeholderTextColor={PLACEHOLDER}
+              placeholderTextColor={PLACEHOLDER}
               style={styles.champ}
               placeholder="Nom : prénom de l'enfant, Vacances…"
               value={nom}
               onChangeText={setNom}
               maxLength={40}
             />
-            <Bouton titre="Créer la tirelire" onPress={creer} desactive={occupe} />
+            <Bouton titre="Créer la tirelire" onPress={creer} desactive={occupe} couleur={BLEU} />
           </View>
 
           <Text style={styles.ou}>ou</Text>
 
           <View style={styles.carte}>
             <Text style={styles.titreCarte}>Rejoindre une tirelire</Text>
+            <Text style={styles.aide}>
+              Avec le code d'un parent pour la gérer, ou le code enfant pour la consulter.
+            </Text>
             <TextInput
-            placeholderTextColor={PLACEHOLDER}
+              placeholderTextColor={PLACEHOLDER}
               style={[styles.champ, styles.champCode]}
               placeholder="CODE"
               value={codeSaisi}
@@ -446,32 +551,25 @@ function Accueil({ prenomInitial, onEntrer, onRetour }) {
               autoCorrect={false}
               maxLength={6}
             />
-            <Bouton titre="Rejoindre" onPress={rejoindre} desactive={occupe} couleur={ROSE} />
+            <Bouton titre="Rejoindre" onPress={rejoindre} desactive={occupe} couleur="#4f8ad6" />
           </View>
 
-          {occupe && <ActivityIndicator style={{ marginTop: 16 }} color={VERT} />}
+          {occupe && <ActivityIndicator style={{ marginTop: 16 }} color={BLEU} />}
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </Ecran>
   );
 }
 
-// ---------- Écran principal d'une tirelire ----------
-function Tirelire({ code, prenom, onRetour, onQuitter }) {
+// ---------- Écran d'une tirelire ----------
+function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
   const [infos, setInfos] = useState(null);
   const [operations, setOperations] = useState([]);
   const [erreur, setErreur] = useState(null);
   const [saisie, setSaisie] = useState(null); // 'ajout', 'retrait' ou null
   const [reglages, setReglages] = useState(false);
 
-  // Bouton "retour" d'Android : revient à la liste des tirelires.
-  useEffect(() => {
-    const abonnement = BackHandler.addEventListener('hardwareBackPress', () => {
-      onRetour();
-      return true;
-    });
-    return () => abonnement.remove();
-  }, [onRetour]);
+  useRetourAndroid(onRetour);
 
   // Écoute en direct : chaque changement fait par n'importe qui apparaît tout de suite.
   useEffect(() => {
@@ -581,49 +679,86 @@ function Tirelire({ code, prenom, onRetour, onQuitter }) {
     );
   }
 
-  async function partager() {
+  // Code "enfant" en lecture seule : créé la première fois qu'on en a besoin.
+  async function obtenirCodeEnfant() {
+    if (infos.codeLecture) return infos.codeLecture;
+    let c = genererCode();
+    while (
+      (await getDoc(doc(db, 'lectures', c))).exists() ||
+      (await getDoc(doc(db, 'tirelires', c))).exists()
+    ) {
+      c = genererCode();
+    }
+    await setDoc(doc(db, 'lectures', c), { tirelire: code });
+    await updateDoc(doc(db, 'tirelires', code), { codeLecture: c });
+    return c;
+  }
+
+  async function partagerEnfant() {
+    try {
+      const c = await obtenirCodeEnfant();
+      await Share.share({
+        message: `Voici ta tirelire « ${infos.nom} » ! Installe l'appli Tirelire et entre ce code pour la consulter : ${c}`,
+      });
+    } catch (e) {
+      Alert.alert('Erreur', messageErreur(e));
+    }
+  }
+
+  async function partagerParent() {
     try {
       await Share.share({
-        message: `Rejoins ma tirelire « ${infos ? infos.nom : ''} » dans l'appli Tirelire avec le code : ${code}`,
+        message: `Rejoins la tirelire « ${infos.nom} » dans l'appli Tirelire avec le code : ${code}`,
       });
     } catch (e) {}
   }
 
+  function partager() {
+    Alert.alert('Partager la tirelire', 'Avec qui veux-tu la partager ?', [
+      { text: 'Annuler', style: 'cancel' },
+      { text: "L'enfant (lecture seule)", onPress: partagerEnfant },
+      { text: 'Un parent', onPress: partagerParent },
+    ]);
+  }
+
   if (erreur) {
     return (
-      <SafeAreaView style={[styles.ecran, styles.centre]}>
+      <Ecran centre>
         <Text style={styles.erreur}>{erreur}</Text>
-        <Bouton titre="‹ Mes tirelires" onPress={onRetour} secondaire style={{ alignSelf: 'stretch' }} />
+        <Bouton
+          titre="‹ Mes tirelires"
+          onPress={onRetour}
+          secondaire
+          style={{ alignSelf: 'stretch' }}
+        />
         <Pressable onPress={onQuitter} hitSlop={8}>
           <Text style={styles.lienRouge}>Retirer de mes tirelires</Text>
         </Pressable>
-      </SafeAreaView>
+      </Ecran>
     );
   }
 
-  if (!infos) {
-    return (
-      <SafeAreaView style={[styles.ecran, styles.centre]}>
-        <ActivityIndicator size="large" color={VERT} />
-      </SafeAreaView>
-    );
-  }
+  if (!infos) return <Chargement />;
 
   const objectif = infos.objectif || 0;
   const progression = objectif > 0 ? Math.max(0, Math.min(1, solde / objectif)) : 0;
   const avance = solde < 0; // solde négatif = argent avancé à l'enfant
-  const texteClair = { color: avance ? '#ffcdd2' : '#c8e6c9' };
+  const texteClair = { color: avance ? '#ffcdd2' : BLEU_TEXTE_CLAIR };
 
   const enTete = (
     <View>
-      <View style={[styles.carteSolde, avance && { backgroundColor: ROUGE }]}>
+      <CarteSolde rouge={avance}>
         <Text style={[styles.etiquetteSolde, texteClair]}>
           {avance ? 'Avance à rembourser' : 'Dans la tirelire'}
         </Text>
         <Text style={styles.solde}>{formatEuros(solde)}</Text>
 
         {objectif > 0 ? (
-          <Pressable onPress={() => setReglages(true)} style={styles.objectif}>
+          <Pressable
+            onPress={() => setReglages(true)}
+            disabled={lectureSeule}
+            style={styles.objectif}
+          >
             <Text style={styles.objectifTexte} numberOfLines={1}>
               🎯 {infos.objectifNom ? infos.objectifNom : 'Objectif'} : {formatEuros(objectif)}
             </Text>
@@ -636,79 +771,88 @@ function Tirelire({ code, prenom, onRetour, onQuitter }) {
                 : `Encore ${formatEuros(objectif - solde)} · ${Math.floor(progression * 100)} %`}
             </Text>
           </Pressable>
-        ) : (
+        ) : !lectureSeule ? (
           <Pressable onPress={() => setReglages(true)} hitSlop={8}>
             <Text style={styles.lien}>🎯 Fixer un objectif d'épargne</Text>
           </Pressable>
-        )}
-      </View>
+        ) : null}
+      </CarteSolde>
 
-      <View style={styles.rangeeBoutons}>
-        <Bouton titre="+ Ajouter" onPress={() => setSaisie('ajout')} style={{ flex: 1 }} />
-        <Bouton
-          titre="− Retirer"
-          onPress={() => setSaisie('retrait')}
-          style={{ flex: 1 }}
-          couleur={ROUGE}
-        />
-      </View>
+      {lectureSeule ? (
+        <View style={styles.bandeauLecture}>
+          <Text style={styles.texteBandeau}>👀 Lecture seule : seuls les parents peuvent modifier.</Text>
+        </View>
+      ) : (
+        <View style={styles.rangeeBoutons}>
+          <Bouton titre="+ Ajouter" onPress={() => setSaisie('ajout')} style={{ flex: 1 }} />
+          <Bouton
+            titre="− Retirer"
+            onPress={() => setSaisie('retrait')}
+            style={{ flex: 1 }}
+            couleur={ROUGE}
+          />
+        </View>
+      )}
 
       <Text style={styles.titreSection}>Historique</Text>
     </View>
   );
 
   return (
-    <SafeAreaView style={styles.ecran}>
-      <View style={styles.entete}>
-        <Pressable onPress={onRetour} hitSlop={12} style={styles.boutonRetour}>
-          <Text style={styles.texteRetour}>‹</Text>
-        </Pressable>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.nomTirelire} numberOfLines={1}>
-            🐷 {infos.nom}
-          </Text>
-          <Pressable onPress={partager} hitSlop={8}>
-            <Text style={styles.code}>
-              Code : <Text style={styles.codeGras}>{code}</Text> · Partager
-            </Text>
+    <Ecran>
+      <EnTete
+        titre={infos.nom}
+        sousTitre={lectureSeule ? '👀 Lecture seule' : `Code ${code} · Partager`}
+        onSousTitre={lectureSeule ? null : partager}
+        onRetour={onRetour}
+        droite={
+          <Pressable onPress={() => setReglages(true)} style={styles.boutonReglages} hitSlop={8}>
+            <Text style={styles.texteReglages}>Réglages</Text>
           </Pressable>
-        </View>
-        <Pressable onPress={() => setReglages(true)} style={styles.boutonReglages} hitSlop={8}>
-          <Text style={styles.texteReglages}>Réglages</Text>
-        </Pressable>
-      </View>
+        }
+      />
 
       <FlatList
         data={operations}
         keyExtractor={(op) => op.id}
         ListHeaderComponent={enTete}
         ListEmptyComponent={
-          <Text style={styles.vide}>Aucune opération pour l'instant. Ajoute ta première pièce !</Text>
+          <Text style={styles.vide}>
+            {lectureSeule
+              ? "Pas encore d'opération dans cette tirelire."
+              : "Aucune opération pour l'instant. Ajoute ta première pièce !"}
+          </Text>
         }
         ListFooterComponent={
-          operations.length > 0 ? (
+          operations.length > 0 && !lectureSeule ? (
             <Text style={styles.astuce}>Appui long sur une opération pour la supprimer.</Text>
           ) : null
         }
         renderItem={({ item }) => (
-          <LigneOperation op={item} onSupprimer={() => supprimerOperation(item)} />
+          <LigneOperation
+            op={item}
+            onSupprimer={lectureSeule ? null : () => supprimerOperation(item)}
+          />
         )}
         contentContainerStyle={styles.liste}
       />
 
-      <FenetreMontant
-        type={saisie}
-        onFermer={() => setSaisie(null)}
-        onValider={(centimes, note, date, fermer) =>
-          enregistrerOperation(saisie, centimes, note, date, fermer)
-        }
-      />
+      {!lectureSeule && (
+        <FenetreMontant
+          type={saisie}
+          onFermer={() => setSaisie(null)}
+          onValider={(centimes, note, date, fermer) =>
+            enregistrerOperation(saisie, centimes, note, date, fermer)
+          }
+        />
+      )}
 
       <FenetreReglages
         visible={reglages}
         infos={infos}
         code={code}
         prenom={prenom}
+        lectureSeule={lectureSeule}
         onFermer={() => setReglages(false)}
         onEnregistrer={enregistrerReglages}
         onQuitter={() => {
@@ -716,7 +860,7 @@ function Tirelire({ code, prenom, onRetour, onQuitter }) {
           onQuitter();
         }}
       />
-    </SafeAreaView>
+    </Ecran>
   );
 }
 
@@ -725,8 +869,8 @@ function LigneOperation({ op, onSupprimer }) {
   const positif = op.montant >= 0;
   return (
     <Pressable
-      onLongPress={onSupprimer}
-      style={({ pressed }) => [styles.ligne, pressed && { opacity: 0.7 }]}
+      onLongPress={onSupprimer || undefined}
+      style={({ pressed }) => [styles.ligne, pressed && onSupprimer && { opacity: 0.75 }]}
     >
       <View style={[styles.pastille, { backgroundColor: positif ? VERT_CLAIR : ROUGE_CLAIR }]}>
         <Text style={[styles.pastilleTexte, { color: positif ? VERT : ROUGE }]}>
@@ -799,6 +943,7 @@ function FenetreMontant({ type, onFermer, onValider }) {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         <View style={styles.modal}>
+          <View style={styles.poignee} />
           <Text style={styles.titreModal}>
             {ajout ? "Ajouter de l'argent" : "Retirer de l'argent"}
           </Text>
@@ -841,7 +986,16 @@ function FenetreMontant({ type, onFermer, onValider }) {
 }
 
 // ---------- Fenêtre des réglages ----------
-function FenetreReglages({ visible, infos, code, prenom, onFermer, onEnregistrer, onQuitter }) {
+function FenetreReglages({
+  visible,
+  infos,
+  code,
+  prenom,
+  lectureSeule,
+  onFermer,
+  onEnregistrer,
+  onQuitter,
+}) {
   const [nom, setNom] = useState('');
   const [objectif, setObjectif] = useState('');
   const [objectifNom, setObjectifNom] = useState('');
@@ -874,7 +1028,7 @@ function FenetreReglages({ visible, infos, code, prenom, onFermer, onEnregistrer
   function confirmerQuitter() {
     Alert.alert(
       'Retirer de mes tirelires ?',
-      `Elle disparaît seulement de ce téléphone, elle n'est pas supprimée. Tu pourras la rajouter plus tard avec le code ${code}.`,
+      "Elle disparaît seulement de ce téléphone, elle n'est pas supprimée. Tu pourras la rajouter plus tard avec son code.",
       [
         { text: 'Annuler', style: 'cancel' },
         { text: 'Retirer', style: 'destructive', onPress: onQuitter },
@@ -889,37 +1043,59 @@ function FenetreReglages({ visible, infos, code, prenom, onFermer, onEnregistrer
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         <View style={styles.modal}>
+          <View style={styles.poignee} />
           <Text style={styles.titreModal}>Réglages</Text>
 
-          <Text style={styles.etiquette}>Nom de la tirelire</Text>
-          <TextInput style={styles.champ} value={nom} onChangeText={setNom} maxLength={40} />
+          {lectureSeule ? (
+            <>
+              <Text style={styles.aide}>
+                Cette tirelire est en lecture seule sur ce téléphone : seuls les parents peuvent la
+                modifier.
+              </Text>
+              <Bouton titre="Fermer" secondaire onPress={onFermer} />
+            </>
+          ) : (
+            <>
+              <Text style={styles.etiquette}>Nom de la tirelire</Text>
+              <TextInput
+                placeholderTextColor={PLACEHOLDER}
+                style={styles.champ}
+                value={nom}
+                onChangeText={setNom}
+                maxLength={40}
+              />
 
-          <Text style={styles.etiquette}>Objectif d'épargne (laisser vide pour aucun)</Text>
-          <TextInput
-            placeholderTextColor={PLACEHOLDER}
-            style={styles.champ}
-            placeholder="Montant en €"
-            keyboardType="decimal-pad"
-            value={objectif}
-            onChangeText={setObjectif}
-          />
-          <TextInput
-            placeholderTextColor={PLACEHOLDER}
-            style={styles.champ}
-            placeholder="Pour quoi ? (vélo, vacances…)"
-            value={objectifNom}
-            onChangeText={setObjectifNom}
-            maxLength={40}
-          />
+              <Text style={styles.etiquette}>Objectif d'épargne (laisser vide pour aucun)</Text>
+              <TextInput
+                placeholderTextColor={PLACEHOLDER}
+                style={styles.champ}
+                placeholder="Montant en €"
+                keyboardType="decimal-pad"
+                value={objectif}
+                onChangeText={setObjectif}
+              />
+              <TextInput
+                placeholderTextColor={PLACEHOLDER}
+                style={styles.champ}
+                placeholder="Pour quoi ? (vélo, vacances…)"
+                value={objectifNom}
+                onChangeText={setObjectifNom}
+                maxLength={40}
+              />
 
-          <View style={styles.rangeeBoutons}>
-            <Bouton titre="Annuler" secondaire onPress={onFermer} style={{ flex: 1 }} />
-            <Bouton titre="Enregistrer" onPress={enregistrer} style={{ flex: 1 }} />
-          </View>
+              <View style={styles.rangeeBoutons}>
+                <Bouton titre="Annuler" secondaire onPress={onFermer} style={{ flex: 1 }} />
+                <Bouton titre="Enregistrer" onPress={enregistrer} couleur={BLEU} style={{ flex: 1 }} />
+              </View>
 
-          <Text style={styles.infoPrenom}>
-            Connecté en tant que {prenom} · code {code}
-          </Text>
+              <Text style={styles.infoPrenom}>
+                Code parent : {code}
+                {infos && infos.codeLecture ? `  ·  Code enfant : ${infos.codeLecture}` : ''}
+              </Text>
+            </>
+          )}
+
+          <Text style={styles.infoPrenom}>Connecté en tant que {prenom}</Text>
           <Pressable onPress={confirmerQuitter} hitSlop={8}>
             <Text style={styles.lienRouge}>Retirer de mes tirelires</Text>
           </Pressable>
@@ -948,31 +1124,69 @@ function Bouton({ titre, onPress, couleur = VERT, secondaire, style, desactive }
 }
 
 // ---------- Styles ----------
+const ombre = {
+  shadowColor: '#1e3a6b',
+  shadowOffset: { width: 0, height: 6 },
+  shadowOpacity: 0.12,
+  shadowRadius: 12,
+  elevation: 3,
+};
+
 const styles = StyleSheet.create({
-  ecran: { flex: 1, backgroundColor: FOND },
+  fond: { flex: 1 },
+  ecran: { flex: 1, backgroundColor: 'transparent' },
   centre: { alignItems: 'center', justifyContent: 'center', padding: 24 },
 
+  // En-tête
+  entete: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 6,
+    gap: 10,
+  },
+  logoEntete: { width: 46, height: 46 },
+  titreEntete: { fontSize: 26, fontWeight: '800', color: BLEU_FONCE },
+  sousTitreEntete: { fontSize: 14, color: GRIS, marginTop: 1 },
+  boutonRetour: { paddingRight: 2 },
+  texteRetour: { fontSize: 36, lineHeight: 38, color: BLEU_FONCE, fontWeight: '300' },
+  boutonReglages: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.85)',
+  },
+  texteReglages: { fontSize: 14, fontWeight: '700', color: BLEU_FONCE },
+
   // Accueil
-  accueil: { padding: 24, paddingTop: 40 },
-  logo: { fontSize: 64, textAlign: 'center' },
-  titreAccueil: { fontSize: 32, fontWeight: '800', color: TEXTE, textAlign: 'center' },
-  sousTitre: { fontSize: 16, color: GRIS, textAlign: 'center', marginBottom: 28 },
-  etiquette: { fontSize: 14, fontWeight: '600', color: TEXTE, marginBottom: 6 },
+  accueil: { padding: 20, paddingTop: 24 },
+  lienRetour: { fontSize: 16, color: BLEU, fontWeight: '700', marginBottom: 8 },
+  logoAccueil: { width: 130, height: 130, alignSelf: 'center' },
+  titreAccueil: {
+    fontSize: 34,
+    fontWeight: '800',
+    color: BLEU_FONCE,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  sousTitre: { fontSize: 16, color: GRIS, textAlign: 'center', marginBottom: 20 },
   carte: {
     backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 16,
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: BORDURE,
+    borderRadius: 22,
+    padding: 18,
+    marginBottom: 12,
+    ...ombre,
   },
-  titreCarte: { fontSize: 17, fontWeight: '700', color: TEXTE, marginBottom: 12 },
-  ou: { textAlign: 'center', color: GRIS, marginVertical: 12 },
+  titreCarte: { fontSize: 18, fontWeight: '800', color: TEXTE, marginBottom: 10 },
+  etiquette: { fontSize: 14, fontWeight: '700', color: TEXTE, marginBottom: 6 },
+  aide: { fontSize: 14, color: GRIS, marginBottom: 12, lineHeight: 20 },
+  ou: { textAlign: 'center', color: GRIS, marginVertical: 2, marginBottom: 12, fontWeight: '600' },
   champ: {
-    backgroundColor: '#fff',
+    backgroundColor: '#f8fafc',
     borderWidth: 1,
     borderColor: BORDURE,
-    borderRadius: 12,
+    borderRadius: 14,
     paddingHorizontal: 14,
     paddingVertical: 12,
     fontSize: 16,
@@ -980,132 +1194,138 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   champCode: { fontSize: 22, letterSpacing: 6, textAlign: 'center', fontWeight: '700' },
-  champMontant: { fontSize: 28, textAlign: 'center', fontWeight: '700' },
+  champMontant: { fontSize: 30, textAlign: 'center', fontWeight: '800' },
   champDate: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   texteDate: { fontSize: 16, color: TEXTE },
   indicationDate: { fontSize: 14, color: GRIS },
 
-  // En-tête de la tirelire
-  entete: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: BORDURE,
-  },
-  nomTirelire: { fontSize: 20, fontWeight: '800', color: TEXTE },
-  code: { fontSize: 14, color: GRIS, marginTop: 2 },
-  codeGras: { fontWeight: '700', color: TEXTE, letterSpacing: 1 },
-  boutonReglages: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: FOND,
-  },
-  texteReglages: { fontSize: 14, fontWeight: '600', color: TEXTE },
-
-  // Solde et objectif
-  liste: { padding: 16, paddingBottom: 40 },
+  // Carte du solde
+  liste: { padding: 16, paddingTop: 8, paddingBottom: 40 },
   carteSolde: {
-    backgroundColor: VERT,
-    borderRadius: 20,
-    padding: 20,
+    borderRadius: 24,
+    padding: 22,
     marginBottom: 16,
+    overflow: 'hidden',
+    ...ombre,
   },
-  etiquetteSolde: { color: '#c8e6c9', fontSize: 15 },
-  solde: { color: '#fff', fontSize: 40, fontWeight: '800', marginVertical: 4 },
+  etiquetteSolde: { color: BLEU_TEXTE_CLAIR, fontSize: 15, fontWeight: '600' },
+  solde: { color: '#fff', fontSize: 42, fontWeight: '800', marginVertical: 4 },
   objectif: { marginTop: 10 },
-  objectifTexte: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  objectifTexte: { color: '#fff', fontSize: 15, fontWeight: '700' },
   barre: {
     height: 10,
-    backgroundColor: 'rgba(255,255,255,0.3)',
+    backgroundColor: 'rgba(255,255,255,0.25)',
     borderRadius: 5,
     marginVertical: 8,
     overflow: 'hidden',
   },
   barreRemplie: { height: '100%', backgroundColor: '#fff', borderRadius: 5 },
-  objectifSous: { color: '#c8e6c9', fontSize: 14 },
-  lien: { color: '#fff', fontSize: 15, fontWeight: '600', marginTop: 10, textDecorationLine: 'underline' },
+  objectifSous: { fontSize: 14 },
+  lien: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+    marginTop: 10,
+    textDecorationLine: 'underline',
+  },
 
   rangeeBoutons: { flexDirection: 'row', gap: 12, marginBottom: 8 },
-  titreSection: { fontSize: 18, fontWeight: '700', color: TEXTE, marginTop: 16, marginBottom: 8 },
+  titreSection: { fontSize: 19, fontWeight: '800', color: BLEU_FONCE, marginTop: 14, marginBottom: 10 },
+  bandeauLecture: {
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 8,
+    ...ombre,
+  },
+  texteBandeau: { color: BLEU_FONCE, fontSize: 15, fontWeight: '600', textAlign: 'center' },
+
+  // Liste des tirelires
+  carteListe: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 22,
+    padding: 18,
+    marginBottom: 12,
+    gap: 12,
+    ...ombre,
+  },
+  rangeeTitre: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  badge: { fontSize: 14 },
+  barreListe: {
+    height: 6,
+    backgroundColor: BLEU_PALE,
+    borderRadius: 3,
+    marginTop: 8,
+    overflow: 'hidden',
+  },
+  barreListeRemplie: { height: '100%', backgroundColor: BLEU, borderRadius: 3 },
+  soldeListe: { fontSize: 19, fontWeight: '800', color: VERT },
+  chevron: { fontSize: 26, color: '#94a3b8', marginLeft: 2 },
 
   // Historique
   ligne: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#fff',
-    borderRadius: 14,
-    padding: 12,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: BORDURE,
+    borderRadius: 18,
+    padding: 14,
+    marginBottom: 10,
     gap: 12,
+    ...ombre,
   },
   pastille: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
   },
   pastilleTexte: { fontSize: 20, fontWeight: '800' },
-  ligneTitre: { fontSize: 16, fontWeight: '600', color: TEXTE },
+  ligneTitre: { fontSize: 16, fontWeight: '700', color: TEXTE, flexShrink: 1 },
   ligneSous: { fontSize: 13, color: GRIS, marginTop: 2 },
-  ligneMontant: { fontSize: 16, fontWeight: '700' },
+  ligneMontant: { fontSize: 16, fontWeight: '800' },
   vide: { textAlign: 'center', color: GRIS, marginTop: 24, fontSize: 15 },
   astuce: { textAlign: 'center', color: GRIS, marginTop: 8, fontSize: 13 },
 
   // Fenêtres
-  fondModal: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.4)' },
+  fondModal: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(15,31,51,0.45)' },
   modal: {
     backgroundColor: '#fff',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
     padding: 20,
+    paddingTop: 10,
     paddingBottom: 36,
   },
-  titreModal: { fontSize: 20, fontWeight: '800', color: TEXTE, marginBottom: 16 },
-  infoPrenom: { textAlign: 'center', color: GRIS, marginTop: 16, fontSize: 13 },
-  lienRouge: { textAlign: 'center', color: ROUGE, fontWeight: '600', marginTop: 12, fontSize: 15 },
-
-  // Navigation et liste des tirelires
-  boutonRetour: { paddingRight: 12, paddingVertical: 4 },
-  texteRetour: { fontSize: 34, lineHeight: 36, color: TEXTE, fontWeight: '300' },
-  lienRetour: { fontSize: 16, color: VERT, fontWeight: '600', marginBottom: 8 },
-  carteListe: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: BORDURE,
-    gap: 12,
-  },
-  barreListe: {
-    height: 6,
-    backgroundColor: VERT_CLAIR,
+  poignee: {
+    width: 44,
+    height: 5,
     borderRadius: 3,
-    marginTop: 8,
-    overflow: 'hidden',
+    backgroundColor: BORDURE,
+    alignSelf: 'center',
+    marginBottom: 14,
   },
-  barreListeRemplie: { height: '100%', backgroundColor: VERT, borderRadius: 3 },
-  soldeListe: { fontSize: 18, fontWeight: '800', color: VERT },
-  chevron: { fontSize: 26, color: GRIS, marginLeft: 2 },
+  titreModal: { fontSize: 21, fontWeight: '800', color: BLEU_FONCE, marginBottom: 16 },
+  infoPrenom: { textAlign: 'center', color: GRIS, marginTop: 14, fontSize: 13 },
+  lienRouge: {
+    textAlign: 'center',
+    color: ROUGE,
+    fontWeight: '700',
+    marginTop: 12,
+    fontSize: 15,
+  },
 
   // Boutons
   bouton: {
-    borderRadius: 12,
-    paddingVertical: 14,
+    borderRadius: 16,
+    paddingVertical: 15,
     paddingHorizontal: 16,
     alignItems: 'center',
   },
-  boutonSecondaire: { backgroundColor: FOND, borderWidth: 1, borderColor: BORDURE },
-  texteBouton: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  boutonSecondaire: { backgroundColor: '#fff', borderWidth: 1, borderColor: BORDURE },
+  texteBouton: { color: '#fff', fontSize: 16, fontWeight: '800' },
 
   // Erreur
   erreur: { fontSize: 16, color: ROUGE, textAlign: 'center', marginBottom: 16 },
