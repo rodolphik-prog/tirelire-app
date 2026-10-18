@@ -1,5 +1,5 @@
-import { initializeApp } from '@firebase/app';
-import { getFirestore } from '@firebase/firestore';
+import { initializeApp } from 'firebase/app';
+import { initializeFirestore } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: "AIzaSyDL27oR7DoUyexecC9VQmkV--PTVG0ggHmE",
@@ -11,4 +11,6 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+
+// Le "long polling" rend Firestore fiable sur téléphone (React Native).
+export const db = initializeFirestore(app, { experimentalForceLongPolling: true });
