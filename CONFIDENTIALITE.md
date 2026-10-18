@@ -6,7 +6,7 @@ Tirelire est une application gratuite, sans publicité, qui permet aux parents d
 
 ## Responsable
 
-L'application est éditée par [TON NOM], particulier. Pour toute question ou demande concernant vos données : [TON ADRESSE E-MAIL DE CONTACT].
+L'application est éditée par Rodolphe ANDRIEU, particulier. Pour toute question ou demande concernant vos données : rorolidalgo@gmail.com.
 
 ## Données enregistrées
 
