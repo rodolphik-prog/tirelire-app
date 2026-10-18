@@ -224,8 +224,10 @@ function ListeTirelires({ codes, onOuvrir, onAjouter }) {
         keyExtractor={(c) => c}
         ListHeaderComponent={
           codes.length > 1 ? (
-            <View style={styles.carteSolde}>
-              <Text style={styles.etiquetteSolde}>Total de toutes les tirelires</Text>
+            <View style={[styles.carteSolde, total < 0 && { backgroundColor: ROUGE }]}>
+              <Text style={[styles.etiquetteSolde, total < 0 && { color: '#ffcdd2' }]}>
+                Total de toutes les tirelires
+              </Text>
               <Text style={styles.solde}>{formatEuros(total)}</Text>
             </View>
           ) : null
@@ -296,6 +298,8 @@ function CarteTirelire({ code, onOuvrir, onSolde }) {
         <Text style={styles.ligneSous} numberOfLines={1}>
           {erreur
             ? 'Introuvable ou inaccessible'
+            : solde !== null && solde < 0
+            ? 'Avance à rembourser'
             : objectif > 0
             ? `Objectif ${formatEuros(objectif)} · ${Math.floor(progression * 100)} %`
             : `Code ${code}`}
@@ -306,7 +310,9 @@ function CarteTirelire({ code, onOuvrir, onSolde }) {
           </View>
         )}
       </View>
-      <Text style={styles.soldeListe}>{solde === null ? '' : formatEuros(solde)}</Text>
+      <Text style={[styles.soldeListe, solde !== null && solde < 0 && { color: ROUGE }]}>
+        {solde === null ? '' : formatEuros(solde)}
+      </Text>
       <Text style={styles.chevron}>›</Text>
     </Pressable>
   );
@@ -514,18 +520,40 @@ function Tirelire({ code, prenom, onRetour, onQuitter }) {
   );
 
   // date : null = maintenant (heure du serveur), sinon la date choisie dans le calendrier.
-  function enregistrerOperation(type, centimes, note, date) {
+  // Renvoie true si la fenêtre peut se fermer tout de suite.
+  function enregistrerOperation(type, centimes, note, date, fermer) {
+    function ecrire() {
+      // Pas de "await" : l'opération s'affiche tout de suite, même avec une connexion lente.
+      addDoc(collection(db, 'tirelires', code, 'operations'), {
+        montant: type === 'ajout' ? centimes : -centimes,
+        note: note.trim(),
+        auteur: prenom,
+        date: date ? Timestamp.fromDate(date) : serverTimestamp(),
+      }).catch((e) => Alert.alert('Erreur', messageErreur(e)));
+    }
+
+    // Retrait plus grand que le solde : c'est une avance, le solde devient négatif.
     if (type === 'retrait' && centimes > solde) {
-      Alert.alert('Solde insuffisant', `Il n'y a que ${formatEuros(solde)} dans la tirelire.`);
+      Alert.alert(
+        'Faire une avance ?',
+        `Il y a ${formatEuros(solde)} dans la tirelire. Après ce retrait, le solde sera de ${formatEuros(
+          solde - centimes
+        )} : une avance que l'enfant devra rembourser.`,
+        [
+          { text: 'Annuler', style: 'cancel' },
+          {
+            text: 'Oui, avancer',
+            onPress: () => {
+              ecrire();
+              fermer();
+            },
+          },
+        ]
+      );
       return false;
     }
-    // Pas de "await" : l'opération s'affiche tout de suite, même avec une connexion lente.
-    addDoc(collection(db, 'tirelires', code, 'operations'), {
-      montant: type === 'ajout' ? centimes : -centimes,
-      note: note.trim(),
-      auteur: prenom,
-      date: date ? Timestamp.fromDate(date) : serverTimestamp(),
-    }).catch((e) => Alert.alert('Erreur', messageErreur(e)));
+
+    ecrire();
     return true;
   }
 
@@ -583,11 +611,15 @@ function Tirelire({ code, prenom, onRetour, onQuitter }) {
 
   const objectif = infos.objectif || 0;
   const progression = objectif > 0 ? Math.max(0, Math.min(1, solde / objectif)) : 0;
+  const avance = solde < 0; // solde négatif = argent avancé à l'enfant
+  const texteClair = { color: avance ? '#ffcdd2' : '#c8e6c9' };
 
   const enTete = (
     <View>
-      <View style={styles.carteSolde}>
-        <Text style={styles.etiquetteSolde}>Dans la tirelire</Text>
+      <View style={[styles.carteSolde, avance && { backgroundColor: ROUGE }]}>
+        <Text style={[styles.etiquetteSolde, texteClair]}>
+          {avance ? 'Avance à rembourser' : 'Dans la tirelire'}
+        </Text>
         <Text style={styles.solde}>{formatEuros(solde)}</Text>
 
         {objectif > 0 ? (
@@ -598,7 +630,7 @@ function Tirelire({ code, prenom, onRetour, onQuitter }) {
             <View style={styles.barre}>
               <View style={[styles.barreRemplie, { width: `${progression * 100}%` }]} />
             </View>
-            <Text style={styles.objectifSous}>
+            <Text style={[styles.objectifSous, texteClair]}>
               {solde >= objectif
                 ? 'Objectif atteint ! 🎉'
                 : `Encore ${formatEuros(objectif - solde)} · ${Math.floor(progression * 100)} %`}
@@ -667,7 +699,9 @@ function Tirelire({ code, prenom, onRetour, onQuitter }) {
       <FenetreMontant
         type={saisie}
         onFermer={() => setSaisie(null)}
-        onValider={(centimes, note, date) => enregistrerOperation(saisie, centimes, note, date)}
+        onValider={(centimes, note, date, fermer) =>
+          enregistrerOperation(saisie, centimes, note, date, fermer)
+        }
       />
 
       <FenetreReglages
@@ -755,7 +789,7 @@ function FenetreMontant({ type, onFermer, onValider }) {
       Alert.alert('Montant', 'Saisis un montant valide, par exemple 5 ou 12,50.');
       return;
     }
-    if (onValider(centimes, note, dateModifiee ? date : null)) onFermer();
+    if (onValider(centimes, note, dateModifiee ? date : null, onFermer)) onFermer();
   }
 
   return (
