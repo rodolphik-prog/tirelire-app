@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -24,8 +24,10 @@ import {
   addDoc,
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   orderBy,
   query,
@@ -35,7 +37,7 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
-import { db } from './firebase';
+import { auth, connexion, db } from './firebase';
 
 // ---------- Images ----------
 const IMG_FOND = require('./fond.png'); // fond d'écran : remplacer ce fichier pour changer de fond
@@ -57,7 +59,7 @@ const BORDURE = '#e2e8f0';
 const PLACEHOLDER = '#c4c8cf'; // gris très clair des textes d'exemple dans les champs
 
 // ---------- Mémoire du téléphone ----------
-const CLE_CODES = 'tirelire:codes'; // tirelires suivies sur ce téléphone : [{ code, lecture }]
+const CLE_CODES = 'tirelire:codes'; // tirelires suivies sur ce téléphone : [{ id, lecture }]
 const CLE_CODE_ANCIEN = 'tirelire:code'; // toute première version : une seule tirelire
 const CLE_PRENOM = 'tirelire:prenom';
 
@@ -120,6 +122,92 @@ function messageErreur(e) {
   return (e && e.message) || 'Une erreur inconnue est survenue.';
 }
 
+// ---------- Accès sécurisé aux tirelires ----------
+// Organisation dans Firebase :
+// - tirelires/{id}                 : nom, objectif… (id interne, jamais montré)
+// - tirelires/{id}/operations/…    : ajouts et retraits
+// - tirelires/{id}/membres/{uid}   : les téléphones autorisés, rôle "parent" ou "lecture"
+// - tirelires/{id}/prive/codes     : les codes à partager (visibles des parents seulement)
+// - invitations/{code}             : un code à 6 caractères -> { tirelire, role }
+
+function uidActuel() {
+  return auth.currentUser ? auth.currentUser.uid : null;
+}
+
+// Crée un code d'invitation inédit pour une tirelire.
+async function nouvelleInvitation(idTirelire, role) {
+  let c = genererCode();
+  while ((await getDoc(doc(db, 'invitations', c))).exists()) c = genererCode();
+  await setDoc(doc(db, 'invitations', c), { tirelire: idTirelire, role });
+  return c;
+}
+
+async function invitationSiAbsente(code, idTirelire, role) {
+  if (!(await getDoc(doc(db, 'invitations', code))).exists()) {
+    await setDoc(doc(db, 'invitations', code), { tirelire: idTirelire, role });
+  }
+}
+
+// Tirelire créée avant la sécurisation : son code d'origine devient une invitation "parent",
+// et son éventuel code enfant une invitation "lecture". Les codes déjà partagés restent valables.
+async function migrerAncienne(id) {
+  const ref = doc(db, 'tirelires', id);
+  const snap = await getDoc(ref);
+  if (!snap.exists() || snap.data().v) return;
+  const ancien = snap.data();
+  await invitationSiAbsente(id, id, 'parent');
+  if (ancien.codeLecture) await invitationSiAbsente(ancien.codeLecture, id, 'lecture');
+  await setDoc(doc(db, 'tirelires', id, 'prive', 'codes'), {
+    parent: id,
+    enfant: ancien.codeLecture || null,
+  });
+  await updateDoc(ref, { v: 2, codeLecture: deleteField() });
+}
+
+// Vérifie que ce téléphone a bien accès à une tirelire déjà suivie (et répare si possible).
+// Renvoie le rôle : "parent" ou "lecture". Lance une erreur si l'accès est impossible.
+async function assurerAcces(id, lecture, prenom) {
+  const refMembre = doc(db, 'tirelires', id, 'membres', uidActuel());
+  let membre = await getDoc(refMembre);
+  if (!membre.exists()) {
+    if (lecture) throw new Error('acces');
+    const invitation = await getDoc(doc(db, 'invitations', id));
+    if (invitation.exists() && invitation.data().tirelire === id) {
+      await setDoc(refMembre, {
+        role: invitation.data().role,
+        invitation: id,
+        prenom,
+        depuis: serverTimestamp(),
+      });
+    } else {
+      // Ancienne tirelire : connaître son code d'origine suffit.
+      await setDoc(refMembre, { role: 'parent', prenom, depuis: serverTimestamp() });
+    }
+    membre = await getDoc(refMembre);
+  }
+  const role = membre.data().role;
+  if (role === 'parent') await migrerAncienne(id);
+  return role;
+}
+
+// Efface définitivement une tirelire et tout ce qui la concerne.
+async function supprimerTirelireDefinitivement(id, codes) {
+  const operations = await getDocs(collection(db, 'tirelires', id, 'operations'));
+  await Promise.all(operations.docs.map((d) => deleteDoc(d.ref)));
+  if (codes) {
+    for (const c of [codes.parent, codes.enfant]) {
+      if (c) await deleteDoc(doc(db, 'invitations', c)).catch(() => {});
+    }
+  }
+  await deleteDoc(doc(db, 'tirelires', id, 'prive', 'codes')).catch(() => {});
+  const membres = await getDocs(collection(db, 'tirelires', id, 'membres'));
+  await Promise.all(
+    membres.docs.filter((d) => d.id !== uidActuel()).map((d) => deleteDoc(d.ref))
+  );
+  await deleteDoc(doc(db, 'tirelires', id));
+  await deleteDoc(doc(db, 'tirelires', id, 'membres', uidActuel()));
+}
+
 // Bouton "retour" d'Android
 function useRetourAndroid(action) {
   useEffect(() => {
@@ -159,38 +247,65 @@ function Chargement() {
   );
 }
 
+// Les versions précédentes rangeaient { code } ou seulement le code.
+function normaliserEntree(t) {
+  if (typeof t === 'string') return { id: t, lecture: false };
+  return { id: t.id || t.code, lecture: !!t.lecture };
+}
+
 function Racine() {
-  const [chargement, setChargement] = useState(true);
-  const [tirelires, setTirelires] = useState([]); // [{ code, lecture }] : une par enfant, par exemple
-  const [ouverte, setOuverte] = useState(null); // code de la tirelire affichée, ou null pour la liste
+  const [etat, setEtat] = useState('chargement'); // 'chargement', 'pret' ou 'erreur'
+  const [erreurDemarrage, setErreurDemarrage] = useState('');
+  const [essai, setEssai] = useState(0);
+  const [tirelires, setTirelires] = useState([]); // [{ id, lecture }] : une par enfant, par exemple
+  const [ouverte, setOuverte] = useState(null); // id de la tirelire affichée, ou null pour la liste
   const [ajout, setAjout] = useState(false); // écran "ajouter une tirelire"
   const [prenom, setPrenom] = useState('');
 
   useEffect(() => {
+    let annule = false;
     (async () => {
+      setEtat('chargement');
       try {
+        await connexion();
         const [liste, ancien, p] = await Promise.all([
           AsyncStorage.getItem(CLE_CODES),
           AsyncStorage.getItem(CLE_CODE_ANCIEN),
           AsyncStorage.getItem(CLE_PRENOM),
         ]);
-        if (liste) {
-          // Les versions précédentes rangeaient seulement les codes.
-          setTirelires(
-            JSON.parse(liste).map((t) => (typeof t === 'string' ? { code: t, lecture: false } : t))
-          );
-        } else if (ancien) {
-          const reprise = [{ code: ancien, lecture: false }];
-          setTirelires(reprise);
-          await AsyncStorage.setItem(CLE_CODES, JSON.stringify(reprise));
+        let entrees = [];
+        if (liste) entrees = JSON.parse(liste).map(normaliserEntree);
+        else if (ancien) entrees = [{ id: ancien, lecture: false }];
+
+        // Chaque tirelire suivie doit reconnaître ce téléphone (reprise des anciennes versions).
+        for (const t of entrees) {
+          try {
+            t.lecture = (await assurerAcces(t.id, t.lecture, p || '')) === 'lecture';
+          } catch (e) {
+            // Accès impossible : la tirelire s'affichera comme "inaccessible".
+          }
         }
-        if (p) setPrenom(p);
+        await AsyncStorage.setItem(CLE_CODES, JSON.stringify(entrees));
+        if (!annule) {
+          setTirelires(entrees);
+          if (p) setPrenom(p);
+          setEtat('pret');
+        }
       } catch (e) {
-        // Pas grave : on repart de l'écran d'accueil.
+        if (!annule) {
+          setErreurDemarrage(
+            e && e.code === 'auth/admin-restricted-operation'
+              ? 'La connexion anonyme n\'est pas activée dans Firebase (Authentication > Sign-in method > Anonyme).'
+              : messageErreur(e)
+          );
+          setEtat('erreur');
+        }
       }
-      setChargement(false);
     })();
-  }, []);
+    return () => {
+      annule = true;
+    };
+  }, [essai]);
 
   async function enregistrer(liste) {
     setTirelires(liste);
@@ -199,34 +314,43 @@ function Racine() {
     } catch (e) {}
   }
 
-  async function entrer(code, nouveauPrenom, lecture) {
-    const existante = tirelires.find((t) => t.code === code);
+  async function entrer(id, nouveauPrenom, lecture) {
+    const existante = tirelires.find((t) => t.id === id);
     if (!existante) {
-      await enregistrer([...tirelires, { code, lecture }]);
-    } else if (existante.lecture && !lecture) {
-      // On avait la tirelire en lecture seule, on reçoit maintenant le code complet.
-      await enregistrer(tirelires.map((t) => (t.code === code ? { code, lecture: false } : t)));
+      await enregistrer([...tirelires, { id, lecture }]);
+    } else if (existante.lecture !== lecture) {
+      await enregistrer(tirelires.map((t) => (t.id === id ? { id, lecture } : t)));
     }
     try {
       await AsyncStorage.setItem(CLE_PRENOM, nouveauPrenom);
     } catch (e) {}
     setPrenom(nouveauPrenom);
     setAjout(false);
-    setOuverte(code);
+    setOuverte(id);
   }
 
-  function retirer(code) {
-    enregistrer(tirelires.filter((t) => t.code !== code));
+  function retirer(id) {
+    enregistrer(tirelires.filter((t) => t.id !== id));
     setOuverte(null);
   }
 
   const revenirListe = useCallback(() => setOuverte(null), []);
   const fermerAjout = useCallback(() => setAjout(false), []);
 
-  if (chargement) return <Chargement />;
+  if (etat === 'chargement') return <Chargement />;
+
+  if (etat === 'erreur') {
+    return (
+      <Ecran centre>
+        <Image source={IMG_LOGO} style={styles.logoAccueil} />
+        <Text style={styles.erreur}>{erreurDemarrage}</Text>
+        <Bouton titre="Réessayer" onPress={() => setEssai((n) => n + 1)} couleur={BLEU} />
+      </Ecran>
+    );
+  }
 
   if (ouverte) {
-    const t = tirelires.find((x) => x.code === ouverte);
+    const t = tirelires.find((x) => x.id === ouverte);
     return (
       <Tirelire
         code={ouverte}
@@ -303,14 +427,14 @@ function ListeTirelires({ tirelires, onOuvrir, onAjouter }) {
       setSoldes((avant) => (avant[code] === solde ? avant : { ...avant, [code]: solde })),
     []
   );
-  const total = tirelires.reduce((t, x) => t + (soldes[x.code] || 0), 0);
+  const total = tirelires.reduce((t, x) => t + (soldes[x.id] || 0), 0);
 
   return (
     <Ecran>
       <EnTete titre="Mes tirelires" />
       <FlatList
         data={tirelires}
-        keyExtractor={(t) => t.code}
+        keyExtractor={(t) => t.id}
         ListHeaderComponent={
           tirelires.length > 1 ? (
             <CarteSolde rouge={total < 0}>
@@ -323,9 +447,9 @@ function ListeTirelires({ tirelires, onOuvrir, onAjouter }) {
         }
         renderItem={({ item }) => (
           <CarteTirelire
-            code={item.code}
+            code={item.id}
             lecture={item.lecture}
-            onOuvrir={() => onOuvrir(item.code)}
+            onOuvrir={() => onOuvrir(item.id)}
             onSolde={majSolde}
           />
         )}
@@ -388,7 +512,7 @@ function CarteTirelire({ code, lecture, onOuvrir, onSolde }) {
     sousTitre = `${infos.objectifNom || 'Objectif'} ${formatEuros(objectif)} · ${Math.floor(
       progression * 100
     )} %`;
-  else sousTitre = lecture ? 'Lecture seule' : `Code ${code}`;
+  else sousTitre = lecture ? 'Lecture seule' : "Pas d'objectif pour l'instant";
 
   return (
     <Pressable
@@ -398,7 +522,7 @@ function CarteTirelire({ code, lecture, onOuvrir, onSolde }) {
       <View style={{ flex: 1 }}>
         <View style={styles.rangeeTitre}>
           <Text style={styles.ligneTitre} numberOfLines={1}>
-            {erreur ? `Tirelire ${code}` : infos ? infos.nom : '…'}
+            {erreur ? 'Tirelire inaccessible' : infos ? infos.nom : '…'}
           </Text>
           {lecture && <Text style={styles.badge}>👀</Text>}
         </View>
@@ -445,18 +569,28 @@ function Accueil({ prenomInitial, onEntrer, onRetour }) {
     if (!p) return;
     setOccupe(true);
     try {
-      let nouveauCode = genererCode();
-      while ((await getDoc(doc(db, 'tirelires', nouveauCode))).exists()) {
-        nouveauCode = genererCode();
-      }
-      await setDoc(doc(db, 'tirelires', nouveauCode), {
+      const uid = uidActuel();
+      const ref = doc(collection(db, 'tirelires')); // identifiant interne, long et secret
+      await setDoc(ref, {
         nom: nom.trim() || 'Ma tirelire',
         objectif: null,
         objectifNom: '',
         creePar: p,
+        proprietaire: uid,
         creeLe: serverTimestamp(),
+        v: 2,
       });
-      await onEntrer(nouveauCode, p, false);
+      await setDoc(doc(db, 'tirelires', ref.id, 'membres', uid), {
+        role: 'parent',
+        prenom: p,
+        depuis: serverTimestamp(),
+      });
+      const codeParent = await nouvelleInvitation(ref.id, 'parent');
+      await setDoc(doc(db, 'tirelires', ref.id, 'prive', 'codes'), {
+        parent: codeParent,
+        enfant: null,
+      });
+      await onEntrer(ref.id, p, false);
     } catch (e) {
       Alert.alert('Erreur', messageErreur(e));
       setOccupe(false);
@@ -473,20 +607,34 @@ function Accueil({ prenomInitial, onEntrer, onRetour }) {
     }
     setOccupe(true);
     try {
-      // Code complet (parent) ?
-      const tirelire = await getDoc(doc(db, 'tirelires', c));
-      if (tirelire.exists()) {
-        await onEntrer(c, p, false);
+      const uid = uidActuel();
+      const invitation = await getDoc(doc(db, 'invitations', c));
+      if (invitation.exists()) {
+        const { tirelire, role } = invitation.data();
+        const refMembre = doc(db, 'tirelires', tirelire, 'membres', uid);
+        const deja = await getDoc(refMembre);
+        // Un parent qui entre un code enfant garde ses droits de parent.
+        const garderParent = deja.exists() && deja.data().role === 'parent';
+        if (!garderParent) {
+          await setDoc(refMembre, { role, invitation: c, prenom: p, depuis: serverTimestamp() });
+        }
+        await onEntrer(tirelire, p, !garderParent && role === 'lecture');
         return;
       }
-      // Code enfant (lecture seule) ?
-      const lecture = await getDoc(doc(db, 'lectures', c));
-      if (lecture.exists() && lecture.data().tirelire) {
-        await onEntrer(lecture.data().tirelire, p, true);
+      // Ancienne tirelire pas encore mise à jour par son créateur : son code d'origine suffit.
+      try {
+        await setDoc(doc(db, 'tirelires', c, 'membres', uid), {
+          role: 'parent',
+          prenom: p,
+          depuis: serverTimestamp(),
+        });
+      } catch (e) {
+        Alert.alert('Introuvable', 'Aucune tirelire ne porte ce code. Vérifie-le.');
+        setOccupe(false);
         return;
       }
-      Alert.alert('Introuvable', 'Aucune tirelire ne porte ce code. Vérifie-le.');
-      setOccupe(false);
+      await migrerAncienne(c);
+      await onEntrer(c, p, false);
     } catch (e) {
       Alert.alert('Erreur', messageErreur(e));
       setOccupe(false);
@@ -567,9 +715,22 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
   const [operations, setOperations] = useState([]);
   const [erreur, setErreur] = useState(null);
   const [saisie, setSaisie] = useState(null); // 'ajout', 'retrait' ou null
+  const [edition, setEdition] = useState(null); // opération en cours de modification
   const [reglages, setReglages] = useState(false);
+  const [codes, setCodes] = useState(null); // codes à partager (parents seulement)
+  const [suppression, setSuppression] = useState(false);
 
   useRetourAndroid(onRetour);
+
+  // Les codes à partager ne sont lisibles que par les parents.
+  useEffect(() => {
+    if (lectureSeule) return undefined;
+    return onSnapshot(
+      doc(db, 'tirelires', code, 'prive', 'codes'),
+      (snap) => setCodes(snap.exists() ? snap.data() : null),
+      () => setCodes(null)
+    );
+  }, [code, lectureSeule]);
 
   // Écoute en direct : chaque changement fait par n'importe qui apparaît tout de suite.
   useEffect(() => {
@@ -584,7 +745,12 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
           setErreur("Cette tirelire n'existe plus.");
         }
       },
-      (e) => setErreur(messageErreur(e))
+      (e) =>
+        setErreur(
+          e && e.code === 'permission-denied'
+            ? "Ce téléphone n'a plus accès à cette tirelire. Demande le code à un parent."
+            : messageErreur(e)
+        )
     );
 
     const arreterOperations = onSnapshot(
@@ -655,6 +821,42 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
     return true;
   }
 
+  // Modifie une opération existante (montant, désignation, date).
+  function modifierOperation(op, type, centimes, note, date, fermer) {
+    const nouveauMontant = type === 'ajout' ? centimes : -centimes;
+    function ecrire() {
+      const modifs = { montant: nouveauMontant, note: note.trim(), modifiePar: prenom };
+      if (date) modifs.date = Timestamp.fromDate(date);
+      updateDoc(doc(db, 'tirelires', code, 'operations', op.id), modifs).catch((e) =>
+        Alert.alert('Erreur', messageErreur(e))
+      );
+    }
+
+    const soldeApres = solde - op.montant + nouveauMontant;
+    if (soldeApres < 0 && soldeApres < solde) {
+      Alert.alert(
+        'Faire une avance ?',
+        `Après cette modification, le solde sera de ${formatEuros(
+          soldeApres
+        )} : une avance que l'enfant devra rembourser.`,
+        [
+          { text: 'Annuler', style: 'cancel' },
+          {
+            text: 'Oui, avancer',
+            onPress: () => {
+              ecrire();
+              fermer();
+            },
+          },
+        ]
+      );
+      return false;
+    }
+
+    ecrire();
+    return true;
+  }
+
   function supprimerOperation(op) {
     Alert.alert(
       'Supprimer cette opération ?',
@@ -681,16 +883,9 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
 
   // Code "enfant" en lecture seule : créé la première fois qu'on en a besoin.
   async function obtenirCodeEnfant() {
-    if (infos.codeLecture) return infos.codeLecture;
-    let c = genererCode();
-    while (
-      (await getDoc(doc(db, 'lectures', c))).exists() ||
-      (await getDoc(doc(db, 'tirelires', c))).exists()
-    ) {
-      c = genererCode();
-    }
-    await setDoc(doc(db, 'lectures', c), { tirelire: code });
-    await updateDoc(doc(db, 'tirelires', code), { codeLecture: c });
+    if (codes && codes.enfant) return codes.enfant;
+    const c = await nouvelleInvitation(code, 'lecture');
+    await setDoc(doc(db, 'tirelires', code, 'prive', 'codes'), { enfant: c }, { merge: true });
     return c;
   }
 
@@ -706,11 +901,27 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
   }
 
   async function partagerParent() {
+    if (!codes || !codes.parent) {
+      Alert.alert('Code', "Le code n'est pas encore disponible, réessaie dans un instant.");
+      return;
+    }
     try {
       await Share.share({
-        message: `Rejoins la tirelire « ${infos.nom} » dans l'appli Tirelire avec le code : ${code}`,
+        message: `Rejoins la tirelire « ${infos.nom} » dans l'appli Tirelire avec le code : ${codes.parent}`,
       });
     } catch (e) {}
+  }
+
+  async function supprimerDefinitivement() {
+    setReglages(false);
+    setSuppression(true);
+    try {
+      await supprimerTirelireDefinitivement(code, codes);
+      onQuitter();
+    } catch (e) {
+      setSuppression(false);
+      Alert.alert('Erreur', messageErreur(e));
+    }
   }
 
   function partager() {
@@ -719,6 +930,15 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
       { text: "L'enfant (lecture seule)", onPress: partagerEnfant },
       { text: 'Un parent', onPress: partagerParent },
     ]);
+  }
+
+  if (suppression) {
+    return (
+      <Ecran centre>
+        <ActivityIndicator size="large" color={ROUGE} />
+        <Text style={[styles.aide, { marginTop: 16 }]}>Suppression en cours…</Text>
+      </Ecran>
+    );
   }
 
   if (erreur) {
@@ -802,7 +1022,9 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
     <Ecran>
       <EnTete
         titre={infos.nom}
-        sousTitre={lectureSeule ? '👀 Lecture seule' : `Code ${code} · Partager`}
+        sousTitre={
+          lectureSeule ? '👀 Lecture seule' : codes && codes.parent ? `Code ${codes.parent} · Partager` : 'Partager'
+        }
         onSousTitre={lectureSeule ? null : partager}
         onRetour={onRetour}
         droite={
@@ -825,13 +1047,16 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
         }
         ListFooterComponent={
           operations.length > 0 && !lectureSeule ? (
-            <Text style={styles.astuce}>Appui long sur une opération pour la supprimer.</Text>
+            <Text style={styles.astuce}>
+              Appui long pour supprimer, double-clic pour modifier.
+            </Text>
           ) : null
         }
         renderItem={({ item }) => (
           <LigneOperation
             op={item}
             onSupprimer={lectureSeule ? null : () => supprimerOperation(item)}
+            onModifier={lectureSeule ? null : () => setEdition(item)}
           />
         )}
         contentContainerStyle={styles.liste}
@@ -839,10 +1064,23 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
 
       {!lectureSeule && (
         <FenetreMontant
-          type={saisie}
-          onFermer={() => setSaisie(null)}
+          type={saisie || (edition ? (edition.montant >= 0 ? 'ajout' : 'retrait') : null)}
+          operation={edition}
+          onFermer={() => {
+            setSaisie(null);
+            setEdition(null);
+          }}
           onValider={(centimes, note, date, fermer) =>
-            enregistrerOperation(saisie, centimes, note, date, fermer)
+            edition
+              ? modifierOperation(
+                  edition,
+                  edition.montant >= 0 ? 'ajout' : 'retrait',
+                  centimes,
+                  note,
+                  date,
+                  fermer
+                )
+              : enregistrerOperation(saisie, centimes, note, date, fermer)
           }
         />
       )}
@@ -850,11 +1088,12 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
       <FenetreReglages
         visible={reglages}
         infos={infos}
-        code={code}
+        codes={codes}
         prenom={prenom}
         lectureSeule={lectureSeule}
         onFermer={() => setReglages(false)}
         onEnregistrer={enregistrerReglages}
+        onSupprimer={supprimerDefinitivement}
         onQuitter={() => {
           setReglages(false);
           onQuitter();
@@ -865,10 +1104,25 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
 }
 
 // ---------- Une ligne de l'historique ----------
-function LigneOperation({ op, onSupprimer }) {
+function LigneOperation({ op, onSupprimer, onModifier }) {
   const positif = op.montant >= 0;
+  const dernierAppui = useRef(0);
+
+  // Deux appuis rapprochés (moins de 0,35 s) = double-clic.
+  function appui() {
+    if (!onModifier) return;
+    const maintenant = Date.now();
+    if (maintenant - dernierAppui.current < 350) {
+      dernierAppui.current = 0;
+      onModifier();
+    } else {
+      dernierAppui.current = maintenant;
+    }
+  }
+
   return (
     <Pressable
+      onPress={appui}
       onLongPress={onSupprimer || undefined}
       style={({ pressed }) => [styles.ligne, pressed && onSupprimer && { opacity: 0.75 }]}
     >
@@ -895,7 +1149,7 @@ function LigneOperation({ op, onSupprimer }) {
 }
 
 // ---------- Fenêtre pour ajouter / retirer ----------
-function FenetreMontant({ type, onFermer, onValider }) {
+function FenetreMontant({ type, operation, onFermer, onValider }) {
   const [montant, setMontant] = useState('');
   const [note, setNote] = useState('');
   const [date, setDate] = useState(new Date());
@@ -903,13 +1157,20 @@ function FenetreMontant({ type, onFermer, onValider }) {
   const ajout = type === 'ajout';
 
   useEffect(() => {
-    if (type) {
+    if (!type) return;
+    if (operation) {
+      // Modification : on part des valeurs de l'opération.
+      const a = Math.abs(operation.montant);
+      setMontant(`${Math.floor(a / 100)},${String(a % 100).padStart(2, '0')}`);
+      setNote(operation.note || '');
+      setDate(operation.date || new Date());
+    } else {
       setMontant('');
       setNote('');
       setDate(new Date());
-      setDateModifiee(false);
     }
-  }, [type]);
+    setDateModifiee(false);
+  }, [type, operation]);
 
   function choisirDate() {
     DateTimePickerAndroid.open({
@@ -917,10 +1178,9 @@ function FenetreMontant({ type, onFermer, onValider }) {
       mode: 'date',
       onValueChange: (evenement, choisie) => {
         if (!choisie) return;
-        // On garde l'heure actuelle pour que les opérations du même jour restent dans l'ordre.
-        const maintenant = new Date();
+        // On garde l'heure déjà prévue pour que les opérations du même jour restent dans l'ordre.
         const nouvelle = new Date(choisie);
-        nouvelle.setHours(maintenant.getHours(), maintenant.getMinutes(), maintenant.getSeconds(), 0);
+        nouvelle.setHours(date.getHours(), date.getMinutes(), date.getSeconds(), 0);
         setDate(nouvelle);
         setDateModifiee(true);
       },
@@ -945,7 +1205,13 @@ function FenetreMontant({ type, onFermer, onValider }) {
         <View style={styles.modal}>
           <View style={styles.poignee} />
           <Text style={styles.titreModal}>
-            {ajout ? "Ajouter de l'argent" : "Retirer de l'argent"}
+            {operation
+              ? ajout
+                ? 'Modifier cet ajout'
+                : 'Modifier ce retrait'
+              : ajout
+              ? "Ajouter de l'argent"
+              : "Retirer de l'argent"}
           </Text>
           <TextInput
             placeholderTextColor={PLACEHOLDER}
@@ -954,12 +1220,12 @@ function FenetreMontant({ type, onFermer, onValider }) {
             keyboardType="decimal-pad"
             value={montant}
             onChangeText={setMontant}
-            autoFocus
+            autoFocus={!operation}
           />
           <Pressable onPress={choisirDate} style={[styles.champ, styles.champDate]}>
             <Text style={styles.texteDate}>📅  {formatJour(date)}</Text>
             <Text style={styles.indicationDate}>
-              {memeJour(date, new Date()) ? "aujourd'hui · modifier" : 'modifier'}
+              {memeJour(date, new Date()) ? "aujourd'hui · changer" : 'changer'}
             </Text>
           </Pressable>
           <TextInput
@@ -989,12 +1255,13 @@ function FenetreMontant({ type, onFermer, onValider }) {
 function FenetreReglages({
   visible,
   infos,
-  code,
+  codes,
   prenom,
   lectureSeule,
   onFermer,
   onEnregistrer,
   onQuitter,
+  onSupprimer,
 }) {
   const [nom, setNom] = useState('');
   const [objectif, setObjectif] = useState('');
@@ -1023,6 +1290,25 @@ function FenetreReglages({
       objectifNom: objectifNom.trim(),
     });
     onFermer();
+  }
+
+  function confirmerSuppression() {
+    Alert.alert(
+      'Supprimer définitivement ?',
+      `La tirelire « ${infos ? infos.nom : ''} », tout son historique et ses codes seront effacés pour tout le monde. C'est irréversible.`,
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Continuer',
+          style: 'destructive',
+          onPress: () =>
+            Alert.alert('Dernière confirmation', 'Tout effacer maintenant ?', [
+              { text: 'Non', style: 'cancel' },
+              { text: 'Oui, tout effacer', style: 'destructive', onPress: onSupprimer },
+            ]),
+        },
+      ]
+    );
   }
 
   function confirmerQuitter() {
@@ -1088,10 +1374,12 @@ function FenetreReglages({
                 <Bouton titre="Enregistrer" onPress={enregistrer} couleur={BLEU} style={{ flex: 1 }} />
               </View>
 
-              <Text style={styles.infoPrenom}>
-                Code parent : {code}
-                {infos && infos.codeLecture ? `  ·  Code enfant : ${infos.codeLecture}` : ''}
-              </Text>
+              {codes && (
+                <Text style={styles.infoPrenom}>
+                  Code parent : {codes.parent}
+                  {codes.enfant ? `  ·  Code enfant : ${codes.enfant}` : ''}
+                </Text>
+              )}
             </>
           )}
 
@@ -1099,6 +1387,11 @@ function FenetreReglages({
           <Pressable onPress={confirmerQuitter} hitSlop={8}>
             <Text style={styles.lienRouge}>Retirer de mes tirelires</Text>
           </Pressable>
+          {!lectureSeule && (
+            <Pressable onPress={confirmerSuppression} hitSlop={8}>
+              <Text style={styles.lienSupprimer}>Supprimer définitivement cette tirelire</Text>
+            </Pressable>
+          )}
         </View>
       </KeyboardAvoidingView>
     </Modal>
@@ -1326,6 +1619,14 @@ const styles = StyleSheet.create({
   },
   boutonSecondaire: { backgroundColor: '#fff', borderWidth: 1, borderColor: BORDURE },
   texteBouton: { color: '#fff', fontSize: 16, fontWeight: '800' },
+
+  lienSupprimer: {
+    textAlign: 'center',
+    color: '#9f1d1d',
+    fontSize: 13,
+    marginTop: 14,
+    textDecorationLine: 'underline',
+  },
 
   // Erreur
   erreur: { fontSize: 16, color: ROUGE, textAlign: 'center', marginBottom: 16 },
