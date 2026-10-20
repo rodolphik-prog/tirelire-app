@@ -6,6 +6,7 @@ import {
   FlatList,
   Image,
   ImageBackground,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -37,12 +38,14 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
+import { useAudioPlayer } from 'expo-audio';
 import { auth, connexion, db } from './firebase';
 
 // ---------- Images ----------
 const IMG_FOND = require('./fond.png'); // fond d'écran : remplacer ce fichier pour changer de fond
 const IMG_LOGO = require('./logo.png'); // le cochon bleu
 const IMG_CARTE = require('./carte.png'); // carte du solde bleu métallisé
+const SON_PIECES = require('./pieces.mp3'); // pièces qui tombent dans la tirelire
 
 // ---------- Couleurs ----------
 const BLEU = '#1e4f96';
@@ -206,6 +209,25 @@ async function supprimerTirelireDefinitivement(id, codes) {
   );
   await deleteDoc(doc(db, 'tirelires', id));
   await deleteDoc(doc(db, 'tirelires', id, 'membres', uidActuel()));
+}
+
+// Hauteur du clavier virtuel (0 quand il est fermé).
+// Sur les Android récents, l'écran ne se réduit plus tout seul quand le clavier s'ouvre :
+// on mesure donc le clavier pour laisser la place nécessaire en bas.
+function useHauteurClavier(auAffichage) {
+  const [hauteur, setHauteur] = useState(0);
+  useEffect(() => {
+    const ouvert = Keyboard.addListener('keyboardDidShow', (e) => {
+      setHauteur(e.endCoordinates.height);
+      if (auAffichage) setTimeout(auAffichage, 50);
+    });
+    const ferme = Keyboard.addListener('keyboardDidHide', () => setHauteur(0));
+    return () => {
+      ouvert.remove();
+      ferme.remove();
+    };
+  }, [auAffichage]);
+  return hauteur;
 }
 
 // Bouton "retour" d'Android
@@ -549,8 +571,16 @@ function Accueil({ prenomInitial, onEntrer, onRetour }) {
   const [nom, setNom] = useState('');
   const [codeSaisi, setCodeSaisi] = useState('');
   const [occupe, setOccupe] = useState(false);
+  const [mode, setMode] = useState(null); // null = choix, 'creer' ou 'code'
+  const revenirChoix = useCallback(() => setMode(null), []);
+  const defilement = useRef(null);
+  // Quand le clavier s'ouvre, on fait défiler pour garder le champ et le bouton visibles.
+  const montrerBas = useCallback(() => {
+    if (defilement.current) defilement.current.scrollToEnd({ animated: true });
+  }, []);
+  const hauteurClavier = useHauteurClavier(montrerBas);
 
-  useRetourAndroid(onRetour);
+  useRetourAndroid(mode ? revenirChoix : onRetour);
 
   function prenomValide() {
     const p = prenom.trim();
@@ -641,70 +671,114 @@ function Accueil({ prenomInitial, onEntrer, onRetour }) {
     }
   }
 
+  const champPrenom = (
+    <>
+      <Text style={styles.etiquette}>Ton prénom</Text>
+      <TextInput
+        placeholderTextColor={PLACEHOLDER}
+        style={styles.champ}
+        placeholder="Par exemple : Léa"
+        value={prenom}
+        onChangeText={setPrenom}
+        maxLength={30}
+      />
+    </>
+  );
+
   return (
     <Ecran>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <ScrollView contentContainerStyle={styles.accueil} keyboardShouldPersistTaps="handled">
-          {onRetour && (
+      <View style={{ flex: 1 }}>
+        <ScrollView
+          ref={defilement}
+          contentContainerStyle={[styles.accueil, { paddingBottom: 24 + hauteurClavier }]}
+          keyboardShouldPersistTaps="handled"
+        >
+          {mode ? (
+            <Pressable onPress={() => setMode(null)} hitSlop={10} style={{ alignSelf: 'flex-start' }}>
+              <Text style={styles.lienRetour}>‹ Retour</Text>
+            </Pressable>
+          ) : onRetour ? (
             <Pressable onPress={onRetour} hitSlop={10} style={{ alignSelf: 'flex-start' }}>
               <Text style={styles.lienRetour}>‹ Mes tirelires</Text>
             </Pressable>
-          )}
+          ) : null}
           <Image source={IMG_LOGO} style={styles.logoAccueil} />
           <Text style={styles.titreAccueil}>Tirelire</Text>
           <Text style={styles.sousTitre}>L'argent de poche de toute la famille</Text>
 
-          <View style={styles.carte}>
-            <Text style={styles.etiquette}>Ton prénom</Text>
-            <TextInput
-              placeholderTextColor={PLACEHOLDER}
-              style={styles.champ}
-              placeholder="Par exemple : Léa"
-              value={prenom}
-              onChangeText={setPrenom}
-              maxLength={30}
-            />
-          </View>
+          {/* 1. On choisit d'abord ce qu'on veut faire */}
+          {!mode && (
+            <>
+              <Pressable
+                onPress={() => setMode('creer')}
+                style={({ pressed }) => [styles.choix, pressed && { opacity: 0.8 }]}
+              >
+                <Text style={styles.choixIcone}>🐷</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.choixTitre}>Créer une tirelire</Text>
+                  <Text style={styles.choixTexte}>
+                    Pour gérer l'argent de poche de vos enfants.
+                  </Text>
+                </View>
+                <Text style={styles.chevron}>›</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setMode('code')}
+                style={({ pressed }) => [styles.choix, pressed && { opacity: 0.8 }]}
+              >
+                <Text style={styles.choixIcone}>🔑</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.choixTitre}>J'ai un code</Text>
+                  <Text style={styles.choixTexte}>
+                    Reçu d'un parent, pour voir ou gérer une tirelire.
+                  </Text>
+                </View>
+                <Text style={styles.chevron}>›</Text>
+              </Pressable>
+            </>
+          )}
 
-          <View style={styles.carte}>
-            <Text style={styles.titreCarte}>Créer une nouvelle tirelire</Text>
-            <TextInput
-              placeholderTextColor={PLACEHOLDER}
-              style={styles.champ}
-              placeholder="Nom : prénom de l'enfant, Vacances…"
-              value={nom}
-              onChangeText={setNom}
-              maxLength={40}
-            />
-            <Bouton titre="Créer la tirelire" onPress={creer} desactive={occupe} couleur={BLEU} />
-          </View>
+          {/* 2a. Créer */}
+          {mode === 'creer' && (
+            <View style={styles.carte}>
+              <Text style={styles.titreCarte}>Créer une tirelire</Text>
+              {champPrenom}
+              <Text style={styles.etiquette}>Nom de la tirelire</Text>
+              <TextInput
+                placeholderTextColor={PLACEHOLDER}
+                style={styles.champ}
+                placeholder="Prénom de l'enfant, Vacances…"
+                value={nom}
+                onChangeText={setNom}
+                maxLength={40}
+              />
+              <Bouton titre="Créer la tirelire" onPress={creer} desactive={occupe} couleur={BLEU} />
+            </View>
+          )}
 
-          <Text style={styles.ou}>ou</Text>
-
-          <View style={styles.carte}>
-            <Text style={styles.titreCarte}>Rejoindre une tirelire</Text>
-            <Text style={styles.aide}>
-              Avec le code d'un parent pour la gérer, ou le code enfant pour la consulter.
-            </Text>
-            <TextInput
-              placeholderTextColor={PLACEHOLDER}
-              style={[styles.champ, styles.champCode]}
-              placeholder="CODE"
-              value={codeSaisi}
-              onChangeText={(t) => setCodeSaisi(t.toUpperCase())}
-              autoCapitalize="characters"
-              autoCorrect={false}
-              maxLength={6}
-            />
-            <Bouton titre="Rejoindre" onPress={rejoindre} desactive={occupe} couleur="#4f8ad6" />
-          </View>
+          {/* 2b. Entrer un code */}
+          {mode === 'code' && (
+            <View style={styles.carte}>
+              <Text style={styles.titreCarte}>Entrer mon code</Text>
+              {champPrenom}
+              <Text style={styles.etiquette}>Code à 6 caractères</Text>
+              <TextInput
+                placeholderTextColor={PLACEHOLDER}
+                style={[styles.champ, styles.champCode]}
+                placeholder="CODE"
+                value={codeSaisi}
+                onChangeText={(t) => setCodeSaisi(t.toUpperCase())}
+                autoCapitalize="characters"
+                autoCorrect={false}
+                maxLength={6}
+              />
+              <Bouton titre="Valider le code" onPress={rejoindre} desactive={occupe} couleur={BLEU} />
+            </View>
+          )}
 
           {occupe && <ActivityIndicator style={{ marginTop: 16 }} color={BLEU} />}
         </ScrollView>
-      </KeyboardAvoidingView>
+      </View>
     </Ecran>
   );
 }
@@ -719,6 +793,16 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
   const [reglages, setReglages] = useState(false);
   const [codes, setCodes] = useState(null); // codes à partager (parents seulement)
   const [suppression, setSuppression] = useState(false);
+  const sonPieces = useAudioPlayer(SON_PIECES);
+
+  function jouerPieces() {
+    try {
+      sonPieces.seekTo(0);
+      sonPieces.play();
+    } catch (e) {
+      // Pas de son : ce n'est pas grave.
+    }
+  }
 
   useRetourAndroid(onRetour);
 
@@ -787,6 +871,7 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
   // Renvoie true si la fenêtre peut se fermer tout de suite.
   function enregistrerOperation(type, centimes, note, date, fermer) {
     function ecrire() {
+      jouerPieces();
       // Pas de "await" : l'opération s'affiche tout de suite, même avec une connexion lente.
       addDoc(collection(db, 'tirelires', code, 'operations'), {
         montant: type === 'ajout' ? centimes : -centimes,
@@ -893,7 +978,7 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
     try {
       const c = await obtenirCodeEnfant();
       await Share.share({
-        message: `Voici ta tirelire « ${infos.nom} » ! Installe l'appli Tirelire et entre ce code pour la consulter : ${c}`,
+        message: `Voici ta tirelire « ${infos.nom} » ! Installe l'appli Tirelire, choisis « J'ai un code » et entre : ${c}`,
       });
     } catch (e) {
       Alert.alert('Erreur', messageErreur(e));
@@ -907,7 +992,7 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
     }
     try {
       await Share.share({
-        message: `Rejoins la tirelire « ${infos.nom} » dans l'appli Tirelire avec le code : ${codes.parent}`,
+        message: `Rejoins la tirelire « ${infos.nom} » dans l'appli Tirelire : choisis « J'ai un code » et entre ${codes.parent}`,
       });
     } catch (e) {}
   }
@@ -927,7 +1012,7 @@ function Tirelire({ code, prenom, lectureSeule, onRetour, onQuitter }) {
   function partager() {
     Alert.alert('Partager la tirelire', 'Avec qui veux-tu la partager ?', [
       { text: 'Annuler', style: 'cancel' },
-      { text: "L'enfant (lecture seule)", onPress: partagerEnfant },
+      { text: 'Votre enfant (lecture seule)', onPress: partagerEnfant },
       { text: 'Un parent', onPress: partagerParent },
     ]);
   }
@@ -1474,6 +1559,19 @@ const styles = StyleSheet.create({
   titreCarte: { fontSize: 18, fontWeight: '800', color: TEXTE, marginBottom: 10 },
   etiquette: { fontSize: 14, fontWeight: '700', color: TEXTE, marginBottom: 6 },
   aide: { fontSize: 14, color: GRIS, marginBottom: 12, lineHeight: 20 },
+  choix: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 22,
+    padding: 20,
+    marginBottom: 14,
+    gap: 14,
+    ...ombre,
+  },
+  choixIcone: { fontSize: 34 },
+  choixTitre: { fontSize: 18, fontWeight: '800', color: BLEU_FONCE },
+  choixTexte: { fontSize: 14, color: GRIS, marginTop: 2 },
   ou: { textAlign: 'center', color: GRIS, marginVertical: 2, marginBottom: 12, fontWeight: '600' },
   champ: {
     backgroundColor: '#f8fafc',
