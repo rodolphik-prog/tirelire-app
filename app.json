@@ -7,7 +7,7 @@
     "userInterfaceStyle": "light",
     "icon": "./icon.png",
     "android": {
-      "package": "com.tirelire.app",
+      "package": "fr.matirelire",
       "adaptiveIcon": {
         "foregroundImage": "./adaptive-icon.png",
         "backgroundColor": "#e6eef8"
