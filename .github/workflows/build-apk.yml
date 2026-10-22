@@ -10,10 +10,18 @@ on:
           - preview
           - production
         default: preview
+      ou:
+        description: "github = build gratuit et illimité sur GitHub · expo = build sur les serveurs d'Expo (15 par mois)"
+        type: choice
+        options:
+          - github
+          - expo
+        default: github
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -23,14 +31,47 @@ jobs:
         with:
           node-version: 22
 
+      - name: Setup Java
+        if: inputs.ou == 'github'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Free disk space
+        if: inputs.ou == 'github'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/node_modules/@angular
+          df -h /
+
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
       - name: Install EAS CLI
         run: npm install -g eas-cli
 
-      - name: Build on EAS
+      - name: Build on GitHub
+        if: inputs.ou == 'github'
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_LOCAL_BUILD_ARTIFACTS_DIR: ${{ github.workspace }}/sortie
+          EAS_BUILD_NO_EXPO_GO_WARNING: "true"
+        run: |
+          mkdir -p sortie
+          eas build --platform android --profile ${{ inputs.profil }} --local --non-interactive
+
+      - name: Save the app file
+        if: inputs.ou == 'github'
+        uses: actions/upload-artifact@v5
+        with:
+          name: tirelire-${{ inputs.profil }}
+          path: sortie/*
+          retention-days: 30
+
+      - name: Build on Expo
+        if: inputs.ou == 'expo'
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_BUILD_NO_EXPO_GO_WARNING: "true"
         run: |
           eas build --platform android --profile ${{ inputs.profil }} --non-interactive
